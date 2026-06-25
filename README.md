@@ -11,9 +11,40 @@ and `git pull` across many projects. It is intentionally strict:
 - Dirty work can be moved through private WIP refs on a `sync` remote.
 - No auto-merge, auto-rebase, or force-push.
 
-## Run
+## Run From Source
+
+GitDCY needs Rust, Cargo, and Git on every device.
+
+### macOS
 
 ```bash
+xcode-select --install
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+git clone https://github.com/<owner>/gitdcy.git
+cd gitdcy
+cargo run -p gitdcy-gui
+```
+
+### Windows 11
+
+Install Git for Windows and Rustup. If Rustup asks for native build tools,
+install Visual Studio Build Tools with the C++ desktop workload.
+
+```powershell
+winget install Git.Git Rustlang.Rustup
+git clone https://github.com/<owner>/gitdcy.git
+cd gitdcy
+cargo run -p gitdcy-gui
+```
+
+### Linux Mint / Ubuntu
+
+```bash
+sudo apt update
+sudo apt install -y build-essential git pkg-config libx11-dev libxcb1-dev libxkbcommon-dev libwayland-dev libxrandr-dev libxi-dev libgl1-mesa-dev
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+git clone https://github.com/<owner>/gitdcy.git
+cd gitdcy
 cargo run -p gitdcy-gui
 ```
 
@@ -41,6 +72,15 @@ Dirty sync uses private Git refs under `refs/gitdcy/wip/*`. GitHub and GitLab
 repos need a private `sync` remote for this. Forgejo repos can use their Forgejo
 `origin`.
 
+## Local Config
+
+GitDCY reads machine-local settings from the app config directory as
+`local.yaml`. When run from this source checkout, it also reads
+`.gitdcy.local.yaml`; that file is ignored by Git.
+
+The GUI writes per-device settings, including the `.env` checkbox, to the app
+config directory. Those settings are not committed to this repo.
+
 ## Configure Private WIP Sync
 
 For GitHub/GitLab repos, create or choose a private Git mirror and set it as
@@ -67,7 +107,8 @@ cargo run -p gitdcy-cli -- set-origin-remote my-app
 ```
 
 Ignored local files such as `.env` are not included by default. To move one
-through private WIP sync, opt in per repo from the ignored local config:
+through private WIP sync, select a repo in the GUI and enable **Sync .env through
+private WIP**. The local config equivalent is:
 
 ```yaml
 local_sync_files:
@@ -84,5 +125,9 @@ uses Git's normal tracked, untracked, and ignored-file rules.
 cargo build --release --workspace
 ```
 
-The GUI binary is `target/release/gitdcy-gui`; the CLI binary is
-`target/release/gitdcy`.
+Binary paths:
+
+- macOS/Linux GUI: `target/release/gitdcy-gui`
+- macOS/Linux CLI: `target/release/gitdcy`
+- Windows GUI: `target\release\gitdcy-gui.exe`
+- Windows CLI: `target\release\gitdcy.exe`

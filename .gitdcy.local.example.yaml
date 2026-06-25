@@ -1,5 +1,8 @@
-# Copy to .gitdcy.local.yaml for machine-specific defaults.
-# The copied file is ignored by Git.
+# Optional source-checkout local config.
+#
+# GitDCY normally reads machine-local settings from the app config directory as
+# local.yaml. When running from this source checkout, it also reads a copied
+# .gitdcy.local.yaml file. The copied file is ignored by Git.
 
 # workspace_root: ~/Code
 

@@ -200,6 +200,10 @@ pub fn config_dir() -> Result<PathBuf> {
     Ok(project_dirs()?.config_dir().to_path_buf())
 }
 
+pub fn local_config_path() -> Result<PathBuf> {
+    Ok(config_dir()?.join("local.yaml"))
+}
+
 pub fn manifest_path() -> Result<PathBuf> {
     Ok(config_dir()?.join("workspace.yaml"))
 }
@@ -225,6 +229,40 @@ pub fn sync_remote_template() -> Option<String> {
     load_local_config()
         .sync_remote_template
         .filter(|value| !value.trim().is_empty())
+}
+
+pub fn local_sync_file_enabled(entry: &RepoEntry, file: &str) -> bool {
+    let Some(file) = safe_relative_local_sync_path(file) else {
+        return false;
+    };
+    configured_local_sync_files(entry, &load_local_config())
+        .iter()
+        .any(|path| path == &file)
+}
+
+pub fn set_local_sync_file(entry: &RepoEntry, file: &str, enabled: bool) -> Result<PathBuf> {
+    let file = safe_relative_local_sync_path(file)
+        .with_context(|| format!("invalid local sync file path: {file}"))?;
+    let mut config = load_saved_local_config();
+    let files = config.local_sync_files.get_or_insert_with(BTreeMap::new);
+    let repo_files = files.entry(entry.id.clone()).or_default();
+
+    if enabled {
+        if !repo_files.iter().any(|path| path == &file) {
+            repo_files.push(file);
+            repo_files.sort();
+        }
+    } else {
+        repo_files.retain(|path| path != &file);
+        if repo_files.is_empty() {
+            files.remove(&entry.id);
+        }
+        if files.is_empty() {
+            config.local_sync_files = None;
+        }
+    }
+
+    save_local_config(&config)
 }
 
 pub fn suggested_origin_remote(entry: &RepoEntry) -> Option<String> {
@@ -1266,24 +1304,63 @@ fn home_dir() -> Option<PathBuf> {
     }
 }
 
-fn load_local_config() -> LocalConfig {
-    let mut candidates = Vec::new();
+pub fn load_local_config() -> LocalConfig {
+    let mut config = load_saved_local_config();
     if let Ok(current_dir) = env::current_dir() {
-        candidates.push(current_dir.join(".gitdcy.local.yaml"));
+        config = merge_local_config(
+            config,
+            read_local_config_file(&current_dir.join(".gitdcy.local.yaml")),
+        );
     }
-    if let Ok(config) = config_dir() {
-        candidates.push(config.join("local.yaml"));
-    }
+    config
+}
 
-    for path in candidates {
-        let Ok(text) = fs::read_to_string(&path) else {
-            continue;
-        };
-        if let Ok(config) = serde_norway::from_str::<LocalConfig>(&text) {
-            return config;
-        }
+fn load_saved_local_config() -> LocalConfig {
+    local_config_path()
+        .ok()
+        .map(|path| read_local_config_file(&path))
+        .unwrap_or_default()
+}
+
+fn save_local_config(config: &LocalConfig) -> Result<PathBuf> {
+    let path = local_config_path()?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("create config directory {}", parent.display()))?;
     }
-    LocalConfig::default()
+    let text = serde_norway::to_string(config)?;
+    fs::write(&path, text).with_context(|| format!("write local config {}", path.display()))?;
+    Ok(path)
+}
+
+fn read_local_config_file(path: &Path) -> LocalConfig {
+    let Ok(text) = fs::read_to_string(path) else {
+        return LocalConfig::default();
+    };
+    serde_norway::from_str::<LocalConfig>(&text).unwrap_or_default()
+}
+
+fn merge_local_config(mut base: LocalConfig, next: LocalConfig) -> LocalConfig {
+    if next.workspace_root.is_some() {
+        base.workspace_root = next.workspace_root;
+    }
+    if next.scan_roots.is_some() {
+        base.scan_roots = next.scan_roots;
+    }
+    if next.sync_remote_template.is_some() {
+        base.sync_remote_template = next.sync_remote_template;
+    }
+    if let Some(next_templates) = next.origin_remote_templates {
+        base.origin_remote_templates
+            .get_or_insert_with(BTreeMap::new)
+            .extend(next_templates);
+    }
+    if let Some(next_files) = next.local_sync_files {
+        base.local_sync_files
+            .get_or_insert_with(BTreeMap::new)
+            .extend(next_files);
+    }
+    base
 }
 
 fn expand_home(path: PathBuf) -> PathBuf {

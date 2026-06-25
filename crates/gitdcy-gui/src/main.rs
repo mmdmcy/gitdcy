@@ -1,8 +1,9 @@
 use eframe::egui;
 use gitdcy_core::{
-    clone_repo, commit, default_workspace_root, discover_entries, load_or_discover_manifest, push,
-    save_manifest, set_remote, status_all, suggested_origin_remote, sync_remote_template,
-    sync_repo, CloneRequest, Provider, RepoStatus, SyncReport, WorkspaceManifest, SYNC_REMOTE,
+    clone_repo, commit, default_workspace_root, discover_entries, load_or_discover_manifest,
+    local_sync_file_enabled, push, save_manifest, set_local_sync_file, set_remote, status_all,
+    suggested_origin_remote, sync_remote_template, sync_repo, CloneRequest, Provider, RepoStatus,
+    SyncReport, WorkspaceManifest, SYNC_REMOTE,
 };
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver};
@@ -561,6 +562,29 @@ impl GitDcyApp {
         ui.add_enabled_ui(!self.busy, |ui| {
             if ui.button("Set/Update Sync Remote").clicked() {
                 self.start_set_sync_remote();
+            }
+        });
+
+        ui.add_space(12.0);
+        ui.heading("Private Local Files");
+        let mut env_enabled = local_sync_file_enabled(&status.entry, ".env");
+        ui.add_enabled_ui(!self.busy, |ui| {
+            if ui
+                .checkbox(&mut env_enabled, "Sync .env through private WIP")
+                .changed()
+            {
+                match set_local_sync_file(&status.entry, ".env", env_enabled) {
+                    Ok(path) => {
+                        let state = if env_enabled { "enabled" } else { "disabled" };
+                        self.log(format!(
+                            "{state} .env private WIP sync for {} ({})",
+                            status.entry.id,
+                            path.display()
+                        ));
+                        self.start_refresh();
+                    }
+                    Err(error) => self.log(format!("local file setting failed: {error}")),
+                }
             }
         });
     }
