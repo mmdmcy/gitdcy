@@ -29,3 +29,9 @@
 #   github/my-app:
 #     - .env
 #     - .env.local
+
+# Optional per-repo WIP device approvals. The GUI writes this when you press
+# "Trust Incoming Device".
+# trusted_wip_devices:
+#   github/my-app:
+#     - laptop-name

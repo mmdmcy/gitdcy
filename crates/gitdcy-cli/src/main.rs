@@ -2,7 +2,8 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use gitdcy_core::{
     clone_repo, commit, default_workspace_root, load_or_discover_manifest, push, save_manifest,
-    set_remote, set_suggested_origin_remote, status_all, sync_repo, CloneRequest, Provider,
+    set_remote, set_suggested_origin_remote, set_wip_device_trusted, status_all, sync_repo,
+    CloneRequest, Provider,
 };
 use std::path::PathBuf;
 
@@ -38,6 +39,10 @@ enum Command {
     SetOriginRemote {
         repo: String,
         url: Option<String>,
+    },
+    TrustDevice {
+        repo: String,
+        device: String,
     },
     Clone {
         url: String,
@@ -103,6 +108,12 @@ fn main() -> Result<()> {
                 set_suggested_origin_remote(&entry)?
             };
             println!("set origin for {} -> {}", entry.id, url);
+            Ok(())
+        }
+        Command::TrustDevice { repo, device } => {
+            let entry = find_repo(&repo)?;
+            let path = set_wip_device_trusted(&entry, &device, true)?;
+            println!("trusted {device} for {} ({})", entry.id, path.display());
             Ok(())
         }
         Command::Clone {

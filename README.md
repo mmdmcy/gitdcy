@@ -59,6 +59,37 @@ cargo run -p gitdcy-cli -- sync --all
 The default workspace root is `~/Code`. On first run, if no manifest exists, the
 app scans configured roots and discovers Git repositories.
 
+## Sync Multiple Devices
+
+GitDCY does not use a special pairing code. Device access is controlled by Git:
+if a device can clone, fetch, and push to the configured Git remotes, GitDCY can
+use those remotes for sync.
+
+Set up each device like this:
+
+1. Install GitDCY and Git.
+2. Sign in to the Git hosts you use, usually with SSH keys, a credential helper,
+   or the host's normal login flow.
+3. Clone your repos into provider folders such as `~/Code/github`,
+   `~/Code/gitlab`, or `~/Code/forgejo`.
+4. Open the GUI and press **Refresh**.
+5. For GitHub/GitLab repos, set a private **sync** remote for WIP refs. Forgejo
+   repos can use Forgejo `origin` when that remote is private and reachable from
+   your devices.
+6. Press **Sync All**.
+
+When a repo receives WIP from a device that has not been approved on this
+machine, GitDCY stops before applying it. Select the repo and press **Trust
+Incoming Device**, then sync again. The CLI equivalent is:
+
+```bash
+cargo run -p gitdcy-cli -- trust-device <repo> <device>
+```
+
+This approval is a local safety guard, not cryptographic MFA. The security
+boundary is still the Git remote: remove a lost laptop's SSH key or token from
+GitHub, GitLab, or Forgejo to revoke it.
+
 ## Daily Use
 
 1. Open the GUI.

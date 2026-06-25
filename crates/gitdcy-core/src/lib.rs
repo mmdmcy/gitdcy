@@ -90,6 +90,7 @@ pub struct RepoStatus {
     pub ahead: Option<u32>,
     pub behind: Option<u32>,
     pub incoming_wip: Option<WipRef>,
+    pub incoming_wip_trusted: bool,
     pub outgoing_wip: Option<WipRef>,
     pub last_error: Option<String>,
 }
@@ -116,8 +117,12 @@ impl RepoStatus {
         if let Some(behind) = self.behind.filter(|value| *value > 0) {
             parts.push(format!("{behind} behind"));
         }
-        if self.incoming_wip.is_some() {
-            parts.push("incoming WIP".to_string());
+        if let Some(wip) = &self.incoming_wip {
+            if self.incoming_wip_trusted {
+                parts.push("incoming WIP".to_string());
+            } else {
+                parts.push(format!("untrusted WIP from {}", wip.device));
+            }
         }
         if let Some(error) = &self.last_error {
             parts.push(format!("blocked: {error}"));
@@ -189,6 +194,7 @@ pub struct LocalConfig {
     pub sync_remote_template: Option<String>,
     pub origin_remote_templates: Option<BTreeMap<String, String>>,
     pub local_sync_files: Option<BTreeMap<String, Vec<String>>>,
+    pub trusted_wip_devices: Option<BTreeMap<String, Vec<String>>>,
 }
 
 pub fn project_dirs() -> Result<ProjectDirs> {
@@ -259,6 +265,35 @@ pub fn set_local_sync_file(entry: &RepoEntry, file: &str, enabled: bool) -> Resu
         }
         if files.is_empty() {
             config.local_sync_files = None;
+        }
+    }
+
+    save_local_config(&config)
+}
+
+pub fn wip_device_trusted(entry: &RepoEntry, device: &str) -> bool {
+    wip_device_trusted_with_config(entry, device, &load_local_config())
+}
+
+pub fn set_wip_device_trusted(entry: &RepoEntry, device: &str, trusted: bool) -> Result<PathBuf> {
+    let device =
+        normalize_device_id(device).with_context(|| format!("invalid device: {device}"))?;
+    let mut config = load_saved_local_config();
+    let devices = config.trusted_wip_devices.get_or_insert_with(BTreeMap::new);
+    let repo_devices = devices.entry(entry.id.clone()).or_default();
+
+    if trusted {
+        if !repo_devices.iter().any(|value| value == &device) {
+            repo_devices.push(device);
+            repo_devices.sort();
+        }
+    } else {
+        repo_devices.retain(|value| value != &device);
+        if repo_devices.is_empty() {
+            devices.remove(&entry.id);
+        }
+        if devices.is_empty() {
+            config.trusted_wip_devices = None;
         }
     }
 
@@ -407,6 +442,7 @@ pub fn repo_status(entry: &RepoEntry) -> RepoStatus {
             ahead: None,
             behind: None,
             incoming_wip: None,
+            incoming_wip_trusted: true,
             outgoing_wip: None,
             last_error: Some(error.to_string()),
         },
@@ -414,10 +450,11 @@ pub fn repo_status(entry: &RepoEntry) -> RepoStatus {
 }
 
 pub fn repo_status_result(entry: &RepoEntry) -> Result<RepoStatus> {
+    let config = load_local_config();
     let branch = current_branch(&entry.path)?;
     let tracking_branch = tracking_branch(&entry.path).ok();
     let remotes = remotes(&entry.path)?;
-    let dirty_paths = sync_paths(entry)?;
+    let dirty_paths = sync_paths_with_config(entry, &config)?;
     let (ahead, behind) = if let Some(tracking_branch) = &tracking_branch {
         ahead_behind(&entry.path, tracking_branch).unwrap_or((None, None))
     } else {
@@ -426,6 +463,10 @@ pub fn repo_status_result(entry: &RepoEntry) -> Result<RepoStatus> {
     let incoming_wip = latest_incoming_wip(&entry.path, branch.as_deref().unwrap_or("HEAD"))
         .ok()
         .flatten();
+    let incoming_wip_trusted = incoming_wip
+        .as_ref()
+        .map(|wip| wip_device_trusted_with_config(entry, &wip.device, &config))
+        .unwrap_or(true);
     let outgoing_wip = local_wip(&entry.path, branch.as_deref().unwrap_or("HEAD"))
         .ok()
         .flatten();
@@ -440,6 +481,7 @@ pub fn repo_status_result(entry: &RepoEntry) -> Result<RepoStatus> {
         ahead,
         behind,
         incoming_wip,
+        incoming_wip_trusted,
         outgoing_wip,
         last_error: None,
     })
@@ -687,6 +729,42 @@ fn configured_local_sync_files(entry: &RepoEntry, config: &LocalConfig) -> Vec<S
     files
 }
 
+fn configured_trusted_wip_devices(entry: &RepoEntry, config: &LocalConfig) -> Vec<String> {
+    let Some(map) = &config.trusted_wip_devices else {
+        return Vec::new();
+    };
+    let repo_name = entry
+        .path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("");
+    let keys = ["*", entry.id.as_str(), repo_name];
+    let mut devices = Vec::new();
+    let mut seen = BTreeSet::new();
+
+    for key in keys {
+        let Some(values) = map.get(key) else { continue };
+        for value in values {
+            let Some(device) = normalize_device_id(value) else {
+                continue;
+            };
+            if seen.insert(device.clone()) {
+                devices.push(device);
+            }
+        }
+    }
+    devices
+}
+
+fn wip_device_trusted_with_config(entry: &RepoEntry, device: &str, config: &LocalConfig) -> bool {
+    let Some(device) = normalize_device_id(device) else {
+        return false;
+    };
+    configured_trusted_wip_devices(entry, config)
+        .iter()
+        .any(|trusted| trusted == &device)
+}
+
 fn safe_relative_local_sync_path(value: &str) -> Option<String> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
@@ -709,6 +787,14 @@ fn safe_relative_local_sync_path(value: &str) -> Option<String> {
     }
 
     (!parts.is_empty()).then(|| parts.join("/"))
+}
+
+fn normalize_device_id(value: &str) -> Option<String> {
+    let device = sanitize_ref_component(value.trim());
+    if device.is_empty() || device.contains('/') {
+        return None;
+    }
+    Some(device)
 }
 
 fn local_sync_file_exists(repo: &Path, path: &str) -> bool {
@@ -905,6 +991,13 @@ fn apply_latest_incoming_wip(
     let Some(wip) = latest_incoming_wip(repo, branch)? else {
         return Ok(None);
     };
+
+    if !wip_device_trusted_with_config(entry, &wip.device, config) {
+        bail!(
+            "incoming WIP from untrusted device {}; approve it before syncing",
+            wip.device
+        );
+    }
 
     let applied_ref = applied_wip_ref(&wip.device, branch);
     if git_output(repo, ["rev-parse", "--verify", "--quiet", &applied_ref])
@@ -1356,11 +1449,25 @@ fn merge_local_config(mut base: LocalConfig, next: LocalConfig) -> LocalConfig {
             .extend(next_templates);
     }
     if let Some(next_files) = next.local_sync_files {
-        base.local_sync_files
-            .get_or_insert_with(BTreeMap::new)
-            .extend(next_files);
+        merge_list_map(&mut base.local_sync_files, next_files);
+    }
+    if let Some(next_devices) = next.trusted_wip_devices {
+        merge_list_map(&mut base.trusted_wip_devices, next_devices);
     }
     base
+}
+
+fn merge_list_map(
+    base: &mut Option<BTreeMap<String, Vec<String>>>,
+    next: BTreeMap<String, Vec<String>>,
+) {
+    let base = base.get_or_insert_with(BTreeMap::new);
+    for (key, mut values) in next {
+        let existing = base.entry(key).or_default();
+        existing.append(&mut values);
+        existing.sort();
+        existing.dedup();
+    }
 }
 
 fn expand_home(path: PathBuf) -> PathBuf {
@@ -1451,10 +1558,14 @@ mod tests {
         fs::create_dir_all(first.join("node_modules/pkg")).unwrap();
         fs::write(first.join("node_modules/pkg/ignored.js"), "ignored\n").unwrap();
 
-        let first_report = sync_repo(&entry("github/fixture-first", &first));
+        let first_entry = entry("github/fixture", &first);
+        let second_entry = entry("github/fixture", &second);
+        let config = config_trusting("github/fixture", &["first-device"]);
+
+        let first_report = sync_repo_with_config(&first_entry, &config);
         assert!(first_report.blocked.is_none(), "{first_report:?}");
 
-        let second_report = sync_repo(&entry("github/fixture-second", &second));
+        let second_report = sync_repo_with_config(&second_entry, &config);
         assert!(second_report.blocked.is_none(), "{second_report:?}");
         assert_eq!(
             fs::read_to_string(second.join("README.md")).unwrap(),
@@ -1502,10 +1613,8 @@ mod tests {
 
         let mut local_sync_files = BTreeMap::new();
         local_sync_files.insert("github/fixture".to_string(), vec![".env".to_string()]);
-        let config = LocalConfig {
-            local_sync_files: Some(local_sync_files),
-            ..LocalConfig::default()
-        };
+        let mut config = config_trusting("github/fixture", &["first-device"]);
+        config.local_sync_files = Some(local_sync_files);
         let first_entry = entry("github/fixture", &first);
         let second_entry = entry("github/fixture", &second);
 
@@ -1556,11 +1665,15 @@ mod tests {
         run(&second, ["config", "gitdcy.device", "second-device"]);
 
         fs::write(first.join("README.md"), "changed on first\n").unwrap();
-        let first_report = sync_repo(&entry("github/fixture-first", &first));
+        let first_entry = entry("github/fixture", &first);
+        let second_entry = entry("github/fixture", &second);
+        let config = config_trusting("github/fixture", &["first-device"]);
+
+        let first_report = sync_repo_with_config(&first_entry, &config);
         assert!(first_report.blocked.is_none(), "{first_report:?}");
 
         fs::write(second.join("README.md"), "changed on second\n").unwrap();
-        let second_report = sync_repo(&entry("github/fixture-second", &second));
+        let second_report = sync_repo_with_config(&second_entry, &config);
         assert!(
             second_report
                 .blocked
@@ -1571,6 +1684,63 @@ mod tests {
         assert_eq!(
             fs::read_to_string(second.join("README.md")).unwrap(),
             "changed on second\n"
+        );
+    }
+
+    #[test]
+    fn incoming_wip_waits_for_device_trust() {
+        let fixture = GitFixture::new("wip_device_trust");
+        let first = fixture.clone_repo("first");
+        let second = fixture.clone_repo("second");
+        run(
+            &first,
+            [
+                "remote",
+                "add",
+                SYNC_REMOTE,
+                fixture.remote.to_str().unwrap(),
+            ],
+        );
+        run(
+            &second,
+            [
+                "remote",
+                "add",
+                SYNC_REMOTE,
+                fixture.remote.to_str().unwrap(),
+            ],
+        );
+        run(&first, ["config", "gitdcy.device", "first-device"]);
+        run(&second, ["config", "gitdcy.device", "second-device"]);
+
+        let first_entry = entry("github/fixture", &first);
+        let second_entry = entry("github/fixture", &second);
+        fs::write(first.join("README.md"), "changed on first\n").unwrap();
+
+        let first_report = sync_repo_with_config(&first_entry, &LocalConfig::default());
+        assert!(first_report.blocked.is_none(), "{first_report:?}");
+
+        let blocked_report = sync_repo_with_config(&second_entry, &LocalConfig::default());
+        assert!(
+            blocked_report
+                .blocked
+                .as_deref()
+                .is_some_and(|reason| reason.contains("untrusted device first-device")),
+            "{blocked_report:?}"
+        );
+        assert_eq!(
+            fs::read_to_string(second.join("README.md")).unwrap(),
+            "base\n"
+        );
+
+        let trusted_report = sync_repo_with_config(
+            &second_entry,
+            &config_trusting("github/fixture", &["first-device"]),
+        );
+        assert!(trusted_report.blocked.is_none(), "{trusted_report:?}");
+        assert_eq!(
+            fs::read_to_string(second.join("README.md")).unwrap(),
+            "changed on first\n"
         );
     }
 
@@ -1644,6 +1814,18 @@ mod tests {
             report.block(error.to_string());
         }
         report
+    }
+
+    fn config_trusting(repo_id: &str, devices: &[&str]) -> LocalConfig {
+        let mut trusted_wip_devices = BTreeMap::new();
+        trusted_wip_devices.insert(
+            repo_id.to_string(),
+            devices.iter().map(|device| device.to_string()).collect(),
+        );
+        LocalConfig {
+            trusted_wip_devices: Some(trusted_wip_devices),
+            ..LocalConfig::default()
+        }
     }
 
     fn configure_user(repo: &Path) {

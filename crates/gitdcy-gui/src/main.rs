@@ -1,9 +1,9 @@
 use eframe::egui;
 use gitdcy_core::{
     clone_repo, commit, default_workspace_root, discover_entries, load_or_discover_manifest,
-    local_sync_file_enabled, push, save_manifest, set_local_sync_file, set_remote, status_all,
-    suggested_origin_remote, sync_remote_template, sync_repo, CloneRequest, Provider, RepoStatus,
-    SyncReport, WorkspaceManifest, SYNC_REMOTE,
+    local_sync_file_enabled, push, save_manifest, set_local_sync_file, set_remote,
+    set_wip_device_trusted, status_all, suggested_origin_remote, sync_remote_template, sync_repo,
+    CloneRequest, Provider, RepoStatus, SyncReport, WorkspaceManifest, SYNC_REMOTE,
 };
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver};
@@ -564,6 +564,35 @@ impl GitDcyApp {
                 self.start_set_sync_remote();
             }
         });
+
+        if let Some(wip) = &status.incoming_wip {
+            ui.add_space(12.0);
+            ui.heading("Incoming WIP Device");
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Device");
+                ui.monospace(&wip.device);
+            });
+            if status.incoming_wip_trusted {
+                ui.label("Trusted for this repo.");
+            } else {
+                ui.add_enabled_ui(!self.busy, |ui| {
+                    if ui.button("Trust Incoming Device").clicked() {
+                        match set_wip_device_trusted(&status.entry, &wip.device, true) {
+                            Ok(path) => {
+                                self.log(format!(
+                                    "trusted {} for {} ({})",
+                                    wip.device,
+                                    status.entry.id,
+                                    path.display()
+                                ));
+                                self.start_refresh();
+                            }
+                            Err(error) => self.log(format!("device trust failed: {error}")),
+                        }
+                    }
+                });
+            }
+        }
 
         ui.add_space(12.0);
         ui.heading("Private Local Files");
