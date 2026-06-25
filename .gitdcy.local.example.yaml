@@ -1,0 +1,28 @@
+# Copy to .gitdcy.local.yaml for machine-specific defaults.
+# The copied file is ignored by Git.
+
+# workspace_root: ~/Code
+
+# Extra roots to scan when no saved manifest exists.
+# scan_roots:
+#   - ~/Code
+
+# Optional template used by the GUI when suggesting a private sync remote.
+# Supported placeholders: {repo}, {id}
+# sync_remote_template: "ssh://git@example.internal/owner/{repo}.git"
+
+# Optional provider defaults used to suggest origin remotes for repos discovered
+# under provider folders such as ~/Code/github/my-repo.
+# Supported placeholders: {repo}, {id}, {provider}
+# origin_remote_templates:
+#   github: "https://github.com/YOUR_GITHUB_USERNAME/{repo}.git"
+#   gitlab: "git@gitlab.com:YOUR_GITLAB_USERNAME/{repo}.git"
+#   forgejo: "ssh://git@forgejo.example/YOUR_FORGEJO_USERNAME/{repo}.git"
+
+# Optional private WIP file allowlist. These exact relative file paths can be
+# included in private WIP sync even when ignored by Git. Keep this repo-specific
+# for sensitive files such as .env.
+# local_sync_files:
+#   github/my-app:
+#     - .env
+#     - .env.local

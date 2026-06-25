@@ -1,0 +1,6 @@
+/target/
+/.idea/
+/.vscode/
+.gitdcy.local.yaml
+workspace.local.yaml
+*.log
