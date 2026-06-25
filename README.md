@@ -2,8 +2,9 @@
 
 Private Git-only multi-device workspace client.
 
-GitDCY keeps source repos native on each device while avoiding manual `git fetch`
-and `git pull` across many projects. It is intentionally strict:
+GitDCY is written in Rust. It keeps source repos native on each device while
+avoiding manual `git fetch` and `git pull` across many projects. It is
+intentionally strict:
 
 - Git is the sync layer.
 - Ignored files are ignored unless explicitly allowlisted for private WIP sync.
@@ -63,7 +64,8 @@ app scans configured roots and discovers Git repositories.
 
 GitDCY does not use a special pairing code. Device access is controlled by Git:
 if a device can clone, fetch, and push to the configured Git remotes, GitDCY can
-use those remotes for sync.
+use those remotes for sync. In normal use, that means you sign in once per Git
+host on a device, then GitDCY reuses those credentials across repos.
 
 Set up each device like this:
 
@@ -80,15 +82,23 @@ Set up each device like this:
 
 When a repo receives WIP from a device that has not been approved on this
 machine, GitDCY stops before applying it. Select the repo and press **Trust
-Incoming Device**, then sync again. The CLI equivalent is:
+Device For All Repos** to approve that device once across the workspace, or
+**Trust Incoming Device** to approve it only for the selected repo. The CLI
+equivalents are:
 
 ```bash
-cargo run -p gitdcy-cli -- trust-device <repo> <device>
+cargo run -p gitdcy-cli -- trust-device <device> --all
+cargo run -p gitdcy-cli -- trust-device <device> --repo <repo>
 ```
 
 This approval is a local safety guard, not cryptographic MFA. The security
 boundary is still the Git remote: remove a lost laptop's SSH key or token from
 GitHub, GitLab, or Forgejo to revoke it.
+
+A future pairing service could show simultaneous approval popups on two devices
+over a private mesh network or LAN, and copy workspace settings between them.
+The current release keeps the transport Git-only so it remains portable and
+easy to audit.
 
 ## Daily Use
 

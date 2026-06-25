@@ -276,11 +276,19 @@ pub fn wip_device_trusted(entry: &RepoEntry, device: &str) -> bool {
 }
 
 pub fn set_wip_device_trusted(entry: &RepoEntry, device: &str, trusted: bool) -> Result<PathBuf> {
+    set_wip_device_trusted_for_key(&entry.id, device, trusted)
+}
+
+pub fn set_wip_device_trusted_globally(device: &str, trusted: bool) -> Result<PathBuf> {
+    set_wip_device_trusted_for_key("*", device, trusted)
+}
+
+fn set_wip_device_trusted_for_key(key: &str, device: &str, trusted: bool) -> Result<PathBuf> {
     let device =
         normalize_device_id(device).with_context(|| format!("invalid device: {device}"))?;
     let mut config = load_saved_local_config();
     let devices = config.trusted_wip_devices.get_or_insert_with(BTreeMap::new);
-    let repo_devices = devices.entry(entry.id.clone()).or_default();
+    let repo_devices = devices.entry(key.to_string()).or_default();
 
     if trusted {
         if !repo_devices.iter().any(|value| value == &device) {
@@ -290,7 +298,7 @@ pub fn set_wip_device_trusted(entry: &RepoEntry, device: &str, trusted: bool) ->
     } else {
         repo_devices.retain(|value| value != &device);
         if repo_devices.is_empty() {
-            devices.remove(&entry.id);
+            devices.remove(key);
         }
         if devices.is_empty() {
             config.trusted_wip_devices = None;
@@ -1733,10 +1741,8 @@ mod tests {
             "base\n"
         );
 
-        let trusted_report = sync_repo_with_config(
-            &second_entry,
-            &config_trusting("github/fixture", &["first-device"]),
-        );
+        let trusted_report =
+            sync_repo_with_config(&second_entry, &config_trusting("*", &["first-device"]));
         assert!(trusted_report.blocked.is_none(), "{trusted_report:?}");
         assert_eq!(
             fs::read_to_string(second.join("README.md")).unwrap(),

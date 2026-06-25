@@ -2,8 +2,9 @@ use eframe::egui;
 use gitdcy_core::{
     clone_repo, commit, default_workspace_root, discover_entries, load_or_discover_manifest,
     local_sync_file_enabled, push, save_manifest, set_local_sync_file, set_remote,
-    set_wip_device_trusted, status_all, suggested_origin_remote, sync_remote_template, sync_repo,
-    CloneRequest, Provider, RepoStatus, SyncReport, WorkspaceManifest, SYNC_REMOTE,
+    set_wip_device_trusted, set_wip_device_trusted_globally, status_all, suggested_origin_remote,
+    sync_remote_template, sync_repo, CloneRequest, Provider, RepoStatus, SyncReport,
+    WorkspaceManifest, SYNC_REMOTE,
 };
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver};
@@ -583,6 +584,19 @@ impl GitDcyApp {
                                     "trusted {} for {} ({})",
                                     wip.device,
                                     status.entry.id,
+                                    path.display()
+                                ));
+                                self.start_refresh();
+                            }
+                            Err(error) => self.log(format!("device trust failed: {error}")),
+                        }
+                    }
+                    if ui.button("Trust Device For All Repos").clicked() {
+                        match set_wip_device_trusted_globally(&wip.device, true) {
+                            Ok(path) => {
+                                self.log(format!(
+                                    "trusted {} for all repos ({})",
+                                    wip.device,
                                     path.display()
                                 ));
                                 self.start_refresh();

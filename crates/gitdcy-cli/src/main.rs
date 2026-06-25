@@ -1,9 +1,9 @@
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use gitdcy_core::{
     clone_repo, commit, default_workspace_root, load_or_discover_manifest, push, save_manifest,
-    set_remote, set_suggested_origin_remote, set_wip_device_trusted, status_all, sync_repo,
-    CloneRequest, Provider,
+    set_remote, set_suggested_origin_remote, set_wip_device_trusted,
+    set_wip_device_trusted_globally, status_all, sync_repo, CloneRequest, Provider,
 };
 use std::path::PathBuf;
 
@@ -41,8 +41,11 @@ enum Command {
         url: Option<String>,
     },
     TrustDevice {
-        repo: String,
         device: String,
+        #[arg(long)]
+        repo: Option<String>,
+        #[arg(long)]
+        all: bool,
     },
     Clone {
         url: String,
@@ -110,10 +113,23 @@ fn main() -> Result<()> {
             println!("set origin for {} -> {}", entry.id, url);
             Ok(())
         }
-        Command::TrustDevice { repo, device } => {
-            let entry = find_repo(&repo)?;
-            let path = set_wip_device_trusted(&entry, &device, true)?;
-            println!("trusted {device} for {} ({})", entry.id, path.display());
+        Command::TrustDevice { device, repo, all } => {
+            if all && repo.is_some() {
+                bail!("use either --all or --repo, not both");
+            }
+            let scope = if all {
+                "all repos".to_string()
+            } else {
+                repo.clone().context("pass --all or --repo <repo>")?
+            };
+            let path = if all {
+                set_wip_device_trusted_globally(&device, true)?
+            } else {
+                let repo = repo.context("pass --all or --repo <repo>")?;
+                let entry = find_repo(&repo)?;
+                set_wip_device_trusted(&entry, &device, true)?
+            };
+            println!("trusted {device} for {scope} ({})", path.display());
             Ok(())
         }
         Command::Clone {
