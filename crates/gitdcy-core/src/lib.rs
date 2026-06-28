@@ -15,6 +15,33 @@ pub const SYNC_REMOTE: &str = "sync";
 const WIP_HEAD: &str = "refs/gitdcy/wip";
 const WIP_REMOTE: &str = "refs/remotes/sync/wip";
 const WIP_APPLIED: &str = "refs/gitdcy/applied";
+const IGNORE_BLOCK_START: &str = "# BEGIN GITDCY PRIVATE DEFAULTS";
+const IGNORE_BLOCK_END: &str = "# END GITDCY PRIVATE DEFAULTS";
+const GLOBAL_IGNORE_BLOCK: &str = r#"# BEGIN GITDCY PRIVATE DEFAULTS
+AGENTS.md
+.env
+.env.*
+!.env.example
+.codex/
+.claude/
+private/
+docs/private/
+state/
+uploads/
+logs/
+*.log
+*.sqlite
+*.sqlite3
+*.db
+*.pem
+*.key
+id_rsa
+id_ed25519
+node_modules/
+target/
+.DS_Store
+# END GITDCY PRIVATE DEFAULTS
+"#;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -62,6 +89,93 @@ impl Provider {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum VisibilityOverride {
+    Public,
+    Private,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RepoVisibility {
+    Public,
+    Private,
+    Unknown,
+}
+
+impl RepoVisibility {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Public => "public",
+            Self::Private => "private",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SafetySeverity {
+    Fatal,
+    Warning,
+}
+
+impl SafetySeverity {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Fatal => "fatal",
+            Self::Warning => "warning",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SafetyFinding {
+    pub severity: SafetySeverity,
+    pub path: Option<String>,
+    pub reason: String,
+    pub remediation: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepoSafetyReport {
+    pub visibility: RepoVisibility,
+    pub public_targeted: bool,
+    pub findings: Vec<SafetyFinding>,
+}
+
+impl RepoSafetyReport {
+    pub fn ok(visibility: RepoVisibility, public_targeted: bool) -> Self {
+        Self {
+            visibility,
+            public_targeted,
+            findings: Vec::new(),
+        }
+    }
+
+    pub fn fatal_count(&self) -> usize {
+        self.findings
+            .iter()
+            .filter(|finding| finding.severity == SafetySeverity::Fatal)
+            .count()
+    }
+
+    pub fn has_fatal_findings(&self) -> bool {
+        self.fatal_count() > 0
+    }
+
+    pub fn short_state(&self) -> String {
+        let fatal = self.fatal_count();
+        if fatal > 0 {
+            return format!("{fatal} safety block{}", if fatal == 1 { "" } else { "s" });
+        }
+        if self.public_targeted {
+            "public-safe".to_string()
+        } else {
+            "private-target".to_string()
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkspaceManifest {
     pub workspace_root: PathBuf,
@@ -92,6 +206,7 @@ pub struct RepoStatus {
     pub incoming_wip: Option<WipRef>,
     pub incoming_wip_trusted: bool,
     pub outgoing_wip: Option<WipRef>,
+    pub safety: RepoSafetyReport,
     pub last_error: Option<String>,
 }
 
@@ -126,6 +241,9 @@ impl RepoStatus {
         }
         if let Some(error) = &self.last_error {
             parts.push(format!("blocked: {error}"));
+        }
+        if self.safety.has_fatal_findings() {
+            parts.push(self.safety.short_state());
         }
         parts.join(", ")
     }
@@ -195,6 +313,7 @@ pub struct LocalConfig {
     pub origin_remote_templates: Option<BTreeMap<String, String>>,
     pub local_sync_files: Option<BTreeMap<String, Vec<String>>>,
     pub trusted_wip_devices: Option<BTreeMap<String, Vec<String>>>,
+    pub visibility_overrides: Option<BTreeMap<String, VisibilityOverride>>,
 }
 
 pub fn project_dirs() -> Result<ProjectDirs> {
@@ -475,6 +594,7 @@ pub fn repo_status(entry: &RepoEntry) -> RepoStatus {
             incoming_wip: None,
             incoming_wip_trusted: true,
             outgoing_wip: None,
+            safety: RepoSafetyReport::ok(RepoVisibility::Unknown, true),
             last_error: Some(error.to_string()),
         },
     }
@@ -501,6 +621,7 @@ pub fn repo_status_result(entry: &RepoEntry) -> Result<RepoStatus> {
     let outgoing_wip = local_wip(&entry.path, branch.as_deref().unwrap_or("HEAD"))
         .ok()
         .flatten();
+    let safety = audit_repo_with_config(entry, &config)?;
 
     Ok(RepoStatus {
         entry: entry.clone(),
@@ -514,6 +635,7 @@ pub fn repo_status_result(entry: &RepoEntry) -> Result<RepoStatus> {
         incoming_wip,
         incoming_wip_trusted,
         outgoing_wip,
+        safety,
         last_error: None,
     })
 }
@@ -633,18 +755,146 @@ pub fn commit(repo: &Path, message: &str, paths: &[String]) -> Result<()> {
     if message.trim().is_empty() {
         bail!("commit message is required");
     }
+    let entry = entry_for_repo(repo)?;
+    let config = load_local_config();
     if paths.is_empty() {
         git(repo, ["add", "-A"])?;
     } else {
         git_paths(repo, ["add", "-A"], paths)?;
+    }
+    let report = audit_staged_with_config(&entry, &config)?;
+    if report.has_fatal_findings() {
+        let _ = git(repo, ["reset", "-q"]);
+        bail!("{}", format_audit_block(&entry, &report));
     }
     git(repo, ["commit", "-m", message])?;
     Ok(())
 }
 
 pub fn push(repo: &Path) -> Result<()> {
+    let entry = entry_for_repo(repo)?;
+    let report = audit_repo(&entry)?;
+    if report.has_fatal_findings() {
+        bail!("{}", format_audit_block(&entry, &report));
+    }
     git(repo, ["push"])?;
     Ok(())
+}
+
+fn entry_for_repo(repo: &Path) -> Result<RepoEntry> {
+    let remotes = remotes(repo)?;
+    let origin = remotes.get("origin").cloned();
+    let provider = origin
+        .as_deref()
+        .map(Provider::from_url)
+        .filter(|provider| *provider != Provider::Other)
+        .unwrap_or_else(|| Provider::from_path(repo));
+    let id = repo_id(repo, provider);
+    Ok(RepoEntry {
+        id,
+        path: repo.to_path_buf(),
+        provider,
+        enabled: true,
+        primary_remote: origin,
+        wip_sync: true,
+        review_required: false,
+    })
+}
+
+pub fn format_audit_block(entry: &RepoEntry, report: &RepoSafetyReport) -> String {
+    let mut lines = vec![format!(
+        "GitDCY safety audit blocked {} (visibility: {})",
+        entry.id,
+        report.visibility.label()
+    )];
+    for finding in report
+        .findings
+        .iter()
+        .filter(|finding| finding.severity == SafetySeverity::Fatal)
+    {
+        let path = finding.path.as_deref().unwrap_or("-");
+        lines.push(format!(
+            "- [{}] {}: {} ({})",
+            finding.severity.label(),
+            path,
+            finding.reason,
+            finding.remediation
+        ));
+    }
+    lines.join("\n")
+}
+
+pub fn install_global_ignore_template() -> Result<PathBuf> {
+    let path = global_excludes_file_path()?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("create git ignore directory {}", parent.display()))?;
+    }
+    let existing = fs::read_to_string(&path).unwrap_or_default();
+    let merged = merge_managed_ignore_block(&existing);
+    fs::write(&path, merged).with_context(|| format!("write {}", path.display()))?;
+
+    if git_config_global_excludes_file()?.is_none() {
+        let value = path.to_string_lossy().to_string();
+        let output = Command::new("git")
+            .args(["config", "--global", "core.excludesfile", &value])
+            .output()
+            .context("set git global core.excludesfile")?;
+        if !output.status.success() {
+            bail!("{}", command_error("git config", &output));
+        }
+    }
+
+    Ok(path)
+}
+
+fn global_excludes_file_path() -> Result<PathBuf> {
+    if let Some(path) = git_config_global_excludes_file()? {
+        return Ok(expand_home(PathBuf::from(path)));
+    }
+    Ok(config_dir()?.join("git-ignore"))
+}
+
+fn git_config_global_excludes_file() -> Result<Option<String>> {
+    let output = Command::new("git")
+        .args(["config", "--global", "--get", "core.excludesfile"])
+        .output()
+        .context("read git global core.excludesfile")?;
+    if output.status.success() {
+        let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        return Ok((!value.is_empty()).then_some(value));
+    }
+    Ok(None)
+}
+
+fn merge_managed_ignore_block(existing: &str) -> String {
+    let mut output = String::new();
+    let mut in_managed_block = false;
+    for line in existing.lines() {
+        if line.trim() == IGNORE_BLOCK_START {
+            in_managed_block = true;
+            continue;
+        }
+        if line.trim() == IGNORE_BLOCK_END {
+            in_managed_block = false;
+            continue;
+        }
+        if !in_managed_block {
+            output.push_str(line);
+            output.push('\n');
+        }
+    }
+    while output.ends_with("\n\n") {
+        output.pop();
+    }
+    if !output.is_empty() && !output.ends_with('\n') {
+        output.push('\n');
+    }
+    if !output.is_empty() {
+        output.push('\n');
+    }
+    output.push_str(GLOBAL_IGNORE_BLOCK);
+    output
 }
 
 pub fn set_remote(repo: &Path, name: &str, url: &str) -> Result<()> {
@@ -709,6 +959,325 @@ pub fn dirty_paths(repo: &Path) -> Result<Vec<ChangedPath>> {
 
 pub fn sync_paths(entry: &RepoEntry) -> Result<Vec<ChangedPath>> {
     sync_paths_with_config(entry, &load_local_config())
+}
+
+pub fn audit_repo(entry: &RepoEntry) -> Result<RepoSafetyReport> {
+    audit_repo_with_config(entry, &load_local_config())
+}
+
+pub fn audit_all(manifest: &WorkspaceManifest) -> Vec<(RepoEntry, Result<RepoSafetyReport>)> {
+    manifest
+        .repos
+        .iter()
+        .filter(|repo| repo.enabled)
+        .map(|entry| (entry.clone(), audit_repo(entry)))
+        .collect()
+}
+
+fn audit_repo_with_config(entry: &RepoEntry, config: &LocalConfig) -> Result<RepoSafetyReport> {
+    let remotes = remotes(&entry.path)?;
+    let visibility = classify_repo_visibility(entry, &remotes, config);
+    let public_targeted = visibility != RepoVisibility::Private;
+    let mut report = RepoSafetyReport::ok(visibility, public_targeted);
+
+    for path in tracked_paths(&entry.path)? {
+        if let Some(finding) = current_tree_finding(&path, public_targeted) {
+            report.findings.push(finding);
+        }
+    }
+
+    Ok(report)
+}
+
+fn audit_staged_with_config(entry: &RepoEntry, config: &LocalConfig) -> Result<RepoSafetyReport> {
+    let remotes = remotes(&entry.path)?;
+    let visibility = classify_repo_visibility(entry, &remotes, config);
+    let public_targeted = visibility != RepoVisibility::Private;
+    let mut report = RepoSafetyReport::ok(visibility, public_targeted);
+
+    for change in staged_paths(&entry.path)? {
+        if change.deleted {
+            continue;
+        }
+        if let Some(finding) = staged_path_finding(&change.path, public_targeted) {
+            report.findings.push(finding);
+        }
+    }
+
+    Ok(report)
+}
+
+fn classify_repo_visibility(
+    entry: &RepoEntry,
+    remotes: &BTreeMap<String, String>,
+    config: &LocalConfig,
+) -> RepoVisibility {
+    if let Some(override_) = visibility_override(entry, config) {
+        return match override_ {
+            VisibilityOverride::Public => RepoVisibility::Public,
+            VisibilityOverride::Private => RepoVisibility::Private,
+        };
+    }
+
+    if remotes.keys().any(|name| name == "public") {
+        return RepoVisibility::Public;
+    }
+
+    let mut saw_unknown = remotes.is_empty();
+    for url in remotes.values() {
+        match remote_url_visibility(url) {
+            Some(RepoVisibility::Public) => return RepoVisibility::Public,
+            Some(RepoVisibility::Private) => {}
+            _ => saw_unknown = true,
+        }
+    }
+
+    if saw_unknown {
+        RepoVisibility::Unknown
+    } else {
+        RepoVisibility::Private
+    }
+}
+
+fn visibility_override(entry: &RepoEntry, config: &LocalConfig) -> Option<VisibilityOverride> {
+    let overrides = config.visibility_overrides.as_ref()?;
+    let repo_name = entry
+        .path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("");
+    ["*", entry.id.as_str(), repo_name]
+        .into_iter()
+        .find_map(|key| overrides.get(key).copied())
+}
+
+fn remote_url_visibility(url: &str) -> Option<RepoVisibility> {
+    if let Some(slug) = repo_slug_for_host(url, "github.com") {
+        return github_repo_visibility(&slug);
+    }
+    if let Some(slug) = repo_slug_for_host(url, "gitlab.com") {
+        return gitlab_repo_visibility(&slug);
+    }
+    None
+}
+
+fn github_repo_visibility(slug: &str) -> Option<RepoVisibility> {
+    let output = Command::new("gh")
+        .args([
+            "repo",
+            "view",
+            slug,
+            "--json",
+            "visibility",
+            "--jq",
+            ".visibility",
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    visibility_from_text(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn gitlab_repo_visibility(slug: &str) -> Option<RepoVisibility> {
+    let output = Command::new("glab")
+        .args(["repo", "view", slug, "--output", "json"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    visibility_from_text(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn visibility_from_text(text: &str) -> Option<RepoVisibility> {
+    let lower = text.to_ascii_lowercase();
+    if lower.contains("public") {
+        Some(RepoVisibility::Public)
+    } else if lower.contains("private") {
+        Some(RepoVisibility::Private)
+    } else {
+        None
+    }
+}
+
+fn repo_slug_for_host(url: &str, host: &str) -> Option<String> {
+    let trimmed = url.trim().trim_end_matches(".git").trim_end_matches('/');
+    let host_marker = format!("{host}/");
+    if let Some(rest) = trimmed.split_once(&host_marker).map(|(_, rest)| rest) {
+        return normalize_remote_slug(rest);
+    }
+    let scp_marker = format!("{host}:");
+    if let Some(rest) = trimmed.split_once(&scp_marker).map(|(_, rest)| rest) {
+        return normalize_remote_slug(rest);
+    }
+    None
+}
+
+fn normalize_remote_slug(value: &str) -> Option<String> {
+    let slug = value.trim_matches('/').trim_end_matches(".git");
+    let mut parts = slug.split('/').filter(|part| !part.is_empty());
+    let owner = parts.next()?;
+    let repo = parts.next()?;
+    Some(format!("{owner}/{repo}"))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StagedPath {
+    path: String,
+    deleted: bool,
+}
+
+fn staged_paths(repo: &Path) -> Result<Vec<StagedPath>> {
+    let output = git_bytes(repo, ["diff", "--cached", "--name-status", "-z"])?;
+    let parts: Vec<String> = output
+        .split(|byte| *byte == 0)
+        .filter(|part| !part.is_empty())
+        .map(|part| String::from_utf8_lossy(part).to_string())
+        .collect();
+    let mut staged = Vec::new();
+    let mut index = 0;
+    while index < parts.len() {
+        let status = &parts[index];
+        index += 1;
+        if status.starts_with('R') || status.starts_with('C') {
+            if index + 1 >= parts.len() {
+                break;
+            }
+            let _old_path = &parts[index];
+            let new_path = parts[index + 1].clone();
+            index += 2;
+            staged.push(StagedPath {
+                path: new_path,
+                deleted: false,
+            });
+            continue;
+        }
+        if index >= parts.len() {
+            break;
+        }
+        let path = parts[index].clone();
+        index += 1;
+        staged.push(StagedPath {
+            path,
+            deleted: status.starts_with('D'),
+        });
+    }
+    Ok(staged)
+}
+
+fn tracked_paths(repo: &Path) -> Result<Vec<String>> {
+    let output = git_bytes(repo, ["ls-files", "-z"])?;
+    Ok(output
+        .split(|byte| *byte == 0)
+        .filter(|part| !part.is_empty())
+        .map(|part| String::from_utf8_lossy(part).to_string())
+        .collect())
+}
+
+fn current_tree_finding(path: &str, public_targeted: bool) -> Option<SafetyFinding> {
+    if generated_cache_path(path) {
+        return Some(finding(
+            path,
+            "generated dependency/build cache is tracked",
+            "remove it from Git and add the cache path to .gitignore",
+        ));
+    }
+    public_only_path_finding(path, public_targeted)
+}
+
+fn staged_path_finding(path: &str, public_targeted: bool) -> Option<SafetyFinding> {
+    if generated_cache_path(path) {
+        return Some(finding(
+            path,
+            "generated dependency/build cache is staged",
+            "unstage it and add the cache path to .gitignore",
+        ));
+    }
+    public_only_path_finding(path, public_targeted)
+}
+
+fn public_only_path_finding(path: &str, public_targeted: bool) -> Option<SafetyFinding> {
+    if !public_targeted {
+        return None;
+    }
+
+    if agent_notes_path(path) {
+        return Some(finding(
+            path,
+            "agent operating notes are private-by-default for public repos",
+            "remove the file from the public tree or mark the repo private in GitDCY local config",
+        ));
+    }
+    if private_env_path(path) {
+        return Some(finding(
+            path,
+            "private environment file is not public source",
+            "remove it from Git and keep only sanitized .env.example files",
+        ));
+    }
+    if private_runtime_path(path) {
+        return Some(finding(
+            path,
+            "private/runtime path is not public source",
+            "remove it from Git, move it to ignored local state, or confirm the repo is private",
+        ));
+    }
+    if private_key_or_database_path(path) {
+        return Some(finding(
+            path,
+            "private key or local database path is not public source",
+            "remove it from Git and rotate credentials if a real secret was committed",
+        ));
+    }
+    None
+}
+
+fn finding(path: &str, reason: &str, remediation: &str) -> SafetyFinding {
+    SafetyFinding {
+        severity: SafetySeverity::Fatal,
+        path: Some(path.to_string()),
+        reason: reason.to_string(),
+        remediation: remediation.to_string(),
+    }
+}
+
+fn generated_cache_path(path: &str) -> bool {
+    path_has_component(path, "node_modules") || path_has_component(path, "target")
+}
+
+fn agent_notes_path(path: &str) -> bool {
+    path.rsplit('/').next() == Some("AGENTS.md")
+}
+
+fn private_env_path(path: &str) -> bool {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    name.starts_with(".env") && name != ".env.example"
+}
+
+fn private_runtime_path(path: &str) -> bool {
+    path.starts_with("private/")
+        || path.starts_with("docs/private/")
+        || path.starts_with(".codex/")
+        || path.starts_with(".claude/")
+        || path.starts_with("state/")
+        || path.starts_with("uploads/")
+        || path.starts_with("logs/")
+}
+
+fn private_key_or_database_path(path: &str) -> bool {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    matches!(name, "id_rsa" | "id_ed25519")
+        || name.ends_with(".pem")
+        || name.ends_with(".key")
+        || name.ends_with(".sqlite")
+        || name.ends_with(".sqlite3")
+        || name.ends_with(".db")
+}
+
+fn path_has_component(path: &str, component: &str) -> bool {
+    path.split('/').any(|part| part == component)
 }
 
 fn sync_paths_with_config(entry: &RepoEntry, config: &LocalConfig) -> Result<Vec<ChangedPath>> {
@@ -1485,6 +2054,11 @@ fn merge_local_config(mut base: LocalConfig, next: LocalConfig) -> LocalConfig {
     if let Some(next_devices) = next.trusted_wip_devices {
         merge_list_map(&mut base.trusted_wip_devices, next_devices);
     }
+    if let Some(next_overrides) = next.visibility_overrides {
+        base.visibility_overrides
+            .get_or_insert_with(BTreeMap::new)
+            .extend(next_overrides);
+    }
     base
 }
 
@@ -1794,6 +2368,123 @@ mod tests {
             fs::read_to_string(second.join("README.md")).unwrap(),
             "changed on first\n"
         );
+    }
+
+    #[test]
+    fn public_audit_blocks_agent_notes_and_private_env_files() {
+        let fixture = GitFixture::new("public_audit_agents");
+        let repo = fixture.clone_repo("repo");
+        fs::write(repo.join("AGENTS.md"), "private agent routing\n").unwrap();
+        fs::write(repo.join(".env.local"), "SECRET=value\n").unwrap();
+        fs::write(repo.join(".env.example"), "SECRET=\n").unwrap();
+        run(
+            &repo,
+            ["add", "-f", "AGENTS.md", ".env.local", ".env.example"],
+        );
+
+        let report =
+            audit_repo_with_config(&entry("github/fixture", &repo), &LocalConfig::default())
+                .unwrap();
+        let paths: BTreeSet<_> = report
+            .findings
+            .iter()
+            .filter_map(|finding| finding.path.as_deref())
+            .collect();
+        assert!(paths.contains("AGENTS.md"), "{report:?}");
+        assert!(paths.contains(".env.local"), "{report:?}");
+        assert!(!paths.contains(".env.example"), "{report:?}");
+    }
+
+    #[test]
+    fn private_override_allows_agent_notes() {
+        let fixture = GitFixture::new("private_override_agents");
+        let repo = fixture.clone_repo("repo");
+        fs::write(repo.join("AGENTS.md"), "private agent routing\n").unwrap();
+        run(&repo, ["add", "-f", "AGENTS.md"]);
+
+        let mut overrides = BTreeMap::new();
+        overrides.insert("github/fixture".to_string(), VisibilityOverride::Private);
+        let config = LocalConfig {
+            visibility_overrides: Some(overrides),
+            ..LocalConfig::default()
+        };
+        let report = audit_repo_with_config(&entry("github/fixture", &repo), &config).unwrap();
+        assert!(
+            report
+                .findings
+                .iter()
+                .all(|finding| finding.path.as_deref() != Some("AGENTS.md")),
+            "{report:?}"
+        );
+    }
+
+    #[test]
+    fn generated_cache_paths_are_blocked_even_for_private_repos() {
+        let fixture = GitFixture::new("cache_block");
+        let repo = fixture.clone_repo("repo");
+        fs::create_dir_all(repo.join("node_modules/pkg")).unwrap();
+        fs::write(repo.join("node_modules/pkg/index.js"), "generated\n").unwrap();
+        run(&repo, ["add", "-f", "node_modules/pkg/index.js"]);
+
+        let mut overrides = BTreeMap::new();
+        overrides.insert("github/fixture".to_string(), VisibilityOverride::Private);
+        let config = LocalConfig {
+            visibility_overrides: Some(overrides),
+            ..LocalConfig::default()
+        };
+        let report = audit_repo_with_config(&entry("github/fixture", &repo), &config).unwrap();
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|finding| finding.path.as_deref() == Some("node_modules/pkg/index.js")),
+            "{report:?}"
+        );
+    }
+
+    #[test]
+    fn deleting_blocked_paths_is_allowed_in_staged_audit() {
+        let fixture = GitFixture::new("delete_blocked_path");
+        let repo = fixture.clone_repo("repo");
+        fs::write(repo.join("AGENTS.md"), "private agent routing\n").unwrap();
+        run(&repo, ["add", "-f", "AGENTS.md"]);
+        run(&repo, ["commit", "-m", "add agent notes"]);
+        fs::remove_file(repo.join("AGENTS.md")).unwrap();
+        run(&repo, ["add", "-A"]);
+
+        let report =
+            audit_staged_with_config(&entry("github/fixture", &repo), &LocalConfig::default())
+                .unwrap();
+        assert!(!report.has_fatal_findings(), "{report:?}");
+    }
+
+    #[test]
+    fn public_remote_name_marks_repo_public_targeted() {
+        let fixture = GitFixture::new("public_remote");
+        let repo = fixture.clone_repo("repo");
+        run(
+            &repo,
+            ["remote", "add", "public", fixture.remote.to_str().unwrap()],
+        );
+        fs::write(repo.join("AGENTS.md"), "private agent routing\n").unwrap();
+        run(&repo, ["add", "-f", "AGENTS.md"]);
+
+        let report =
+            audit_repo_with_config(&entry("github/fixture", &repo), &LocalConfig::default())
+                .unwrap();
+        assert_eq!(report.visibility, RepoVisibility::Public);
+        assert!(report.has_fatal_findings(), "{report:?}");
+    }
+
+    #[test]
+    fn managed_ignore_block_is_idempotent() {
+        let existing = "# user rule\n*.tmp\n";
+        let once = merge_managed_ignore_block(existing);
+        let twice = merge_managed_ignore_block(&once);
+        assert_eq!(once, twice);
+        assert!(once.contains("AGENTS.md"));
+        assert!(once.contains("node_modules/"));
+        assert!(!once.contains("\ndata/\n"));
     }
 
     struct GitFixture {

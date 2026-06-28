@@ -54,6 +54,7 @@ Useful CLI checks:
 ```bash
 cargo run -p gitdcy-cli -- doctor
 cargo run -p gitdcy-cli -- status
+cargo run -p gitdcy-cli -- audit --all
 cargo run -p gitdcy-cli -- sync --all
 ```
 
@@ -159,6 +160,36 @@ local_sync_files:
 
 This does not change normal commits. `Commit All Non-Ignored Changes` still
 uses Git's normal tracked, untracked, and ignored-file rules.
+
+## Public Repo Safety
+
+GitDCY audits commits and pushes before they enter normal branch history. Public
+targets are stricter than private repos: `AGENTS.md`, real `.env` files,
+private folders, local runtime state, logs, uploads, keys, databases, and
+generated dependency/build caches are blocked before commit or push. Repos with
+a remote named `public` are treated as public targets. GitHub and GitLab
+visibility is detected with `gh` and `glab` when available; unknown targets are
+treated as public unless overridden in local config.
+
+Run a workspace audit:
+
+```bash
+cargo run -p gitdcy-cli -- audit --all
+```
+
+Install GitDCY's conservative global ignore block:
+
+```bash
+cargo run -p gitdcy-cli -- install-ignore --global
+```
+
+Use local-only visibility overrides for unusual remotes:
+
+```yaml
+visibility_overrides:
+  github/private-app: private
+  gitlab/public-export: public
+```
 
 ## Build Binaries
 

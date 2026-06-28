@@ -617,7 +617,26 @@ impl GitDcyApp {
                 ui.label("State");
                 ui.monospace(status.short_state());
                 ui.end_row();
+                ui.label("Safety");
+                ui.monospace(format!(
+                    "{} ({})",
+                    status.safety.short_state(),
+                    status.safety.visibility.label()
+                ));
+                ui.end_row();
             });
+
+        if status.safety.has_fatal_findings() {
+            ui.add_space(8.0);
+            ui.heading("Safety Blocks");
+            for finding in &status.safety.findings {
+                if finding.severity != gitdcy_core::SafetySeverity::Fatal {
+                    continue;
+                }
+                let path = finding.path.as_deref().unwrap_or("-");
+                ui.label(format!("{path}: {}", finding.reason));
+            }
+        }
 
         ui.add_space(12.0);
         ui.horizontal_wrapped(|ui| {
@@ -625,6 +644,8 @@ impl GitDcyApp {
                 if ui.button("Sync").clicked() {
                     self.start_sync_selected();
                 }
+            });
+            ui.add_enabled_ui(!self.busy && !status.safety.has_fatal_findings(), |ui| {
                 if ui.button("Push").clicked() {
                     self.start_push_selected();
                 }
@@ -634,7 +655,7 @@ impl GitDcyApp {
         ui.add_space(12.0);
         ui.label("Commit message");
         ui.text_edit_singleline(&mut self.commit_message);
-        ui.add_enabled_ui(!self.busy, |ui| {
+        ui.add_enabled_ui(!self.busy && !status.safety.has_fatal_findings(), |ui| {
             if ui.button("Commit All Non-Ignored Changes").clicked() {
                 self.start_commit_selected();
             }

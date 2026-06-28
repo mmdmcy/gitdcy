@@ -1,9 +1,10 @@
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use gitdcy_core::{
-    clone_repo, commit, default_workspace_root, load_or_discover_manifest, push, save_manifest,
-    set_remote, set_suggested_origin_remote, set_wip_device_trusted,
-    set_wip_device_trusted_globally, status_all, sync_repo, CloneRequest, Provider,
+    audit_all, audit_repo, clone_repo, commit, default_workspace_root, format_audit_block,
+    install_global_ignore_template, load_or_discover_manifest, push, save_manifest, set_remote,
+    set_suggested_origin_remote, set_wip_device_trusted, set_wip_device_trusted_globally,
+    status_all, sync_repo, CloneRequest, Provider, RepoSafetyReport,
 };
 use std::path::PathBuf;
 
@@ -19,6 +20,15 @@ struct Args {
 enum Command {
     Doctor,
     Status,
+    Audit {
+        #[arg(long)]
+        all: bool,
+        repo: Option<String>,
+    },
+    InstallIgnore {
+        #[arg(long)]
+        global: bool,
+    },
     Sync {
         #[arg(long)]
         all: bool,
@@ -83,6 +93,8 @@ fn main() -> Result<()> {
     match args.command {
         Command::Doctor => doctor(),
         Command::Status => status(),
+        Command::Audit { all, repo } => audit(all, repo),
+        Command::InstallIgnore { global } => install_ignore(global),
         Command::Sync { all, repo } => sync(all, repo),
         Command::Commit { repo, message } => {
             let entry = find_repo(&repo)?;
@@ -194,6 +206,69 @@ fn status() -> Result<()> {
             status.short_state()
         );
     }
+    Ok(())
+}
+
+fn audit(all: bool, repo: Option<String>) -> Result<()> {
+    if all && repo.is_some() {
+        bail!("use either --all or a repo name, not both");
+    }
+    let manifest = load_or_discover_manifest()?;
+    let mut fatal = 0;
+
+    if all {
+        for (entry, report) in audit_all(&manifest) {
+            match report {
+                Ok(report) => {
+                    print_audit_report(&entry, &report);
+                    fatal += report.fatal_count();
+                }
+                Err(error) => {
+                    fatal += 1;
+                    println!("{}: audit failed: {error}", entry.id);
+                }
+            }
+        }
+    } else {
+        let repo = repo.context("pass --all or a repo id/name")?;
+        let entry = manifest
+            .repos
+            .iter()
+            .find(|entry| entry.id == repo || entry.id.ends_with(&format!("/{repo}")))
+            .with_context(|| format!("repo not found: {repo}"))?;
+        let report = audit_repo(entry)?;
+        print_audit_report(entry, &report);
+        fatal += report.fatal_count();
+    }
+
+    if fatal > 0 {
+        bail!(
+            "audit found {fatal} blocking finding{}",
+            if fatal == 1 { "" } else { "s" }
+        );
+    }
+    Ok(())
+}
+
+fn print_audit_report(entry: &gitdcy_core::RepoEntry, report: &RepoSafetyReport) {
+    println!(
+        "{} | visibility={} | {}",
+        entry.id,
+        report.visibility.label(),
+        report.short_state()
+    );
+    if report.findings.is_empty() {
+        return;
+    }
+    println!("{}", format_audit_block(entry, report));
+}
+
+fn install_ignore(global: bool) -> Result<()> {
+    if !global {
+        bail!("pass --global to install the managed global Git ignore block");
+    }
+    let path = install_global_ignore_template()?;
+    println!("installed GitDCY global ignore block in {}", path.display());
     Ok(())
 }
 
