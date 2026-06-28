@@ -13,3 +13,4 @@ anyhow.workspace = true
 eframe.workspace = true
 egui.workspace = true
 gitdcy-core = { path = "../gitdcy-core" }
+rfd = "0.17.2"

@@ -223,12 +223,35 @@ pub fn default_workspace_root() -> PathBuf {
         .join("Code")
 }
 
+pub fn set_workspace_root(root: PathBuf) -> Result<PathBuf> {
+    let root = expand_home(root);
+    let mut config = load_saved_local_config();
+    config.workspace_root = Some(root.clone());
+    ensure_scan_root(&mut config, root);
+    save_local_config(&config)
+}
+
 pub fn default_scan_roots() -> Vec<PathBuf> {
     load_local_config()
         .scan_roots
         .filter(|roots| !roots.is_empty())
         .map(|roots| roots.into_iter().map(expand_home).collect())
         .unwrap_or_else(|| vec![default_workspace_root()])
+}
+
+pub fn add_scan_root(root: PathBuf) -> Result<PathBuf> {
+    let root = expand_home(root);
+    let mut config = load_saved_local_config();
+    if config
+        .scan_roots
+        .as_ref()
+        .is_none_or(|roots| roots.is_empty())
+    {
+        let workspace_root = workspace_root_with_config(&config);
+        ensure_scan_root(&mut config, workspace_root);
+    }
+    ensure_scan_root(&mut config, root);
+    save_local_config(&config)
 }
 
 pub fn sync_remote_template() -> Option<String> {
@@ -1476,6 +1499,29 @@ fn merge_list_map(
         existing.sort();
         existing.dedup();
     }
+}
+
+fn ensure_scan_root(config: &mut LocalConfig, root: PathBuf) {
+    let roots = config.scan_roots.get_or_insert_with(Vec::new);
+    if !roots
+        .iter()
+        .any(|configured| expand_home(configured.clone()) == root)
+    {
+        roots.push(root);
+    }
+    roots.sort_by(|a, b| a.to_string_lossy().cmp(&b.to_string_lossy()));
+}
+
+fn workspace_root_with_config(config: &LocalConfig) -> PathBuf {
+    config
+        .workspace_root
+        .clone()
+        .map(expand_home)
+        .unwrap_or_else(|| {
+            home_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join("Code")
+        })
 }
 
 fn expand_home(path: PathBuf) -> PathBuf {

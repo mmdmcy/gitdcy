@@ -1,12 +1,12 @@
 use eframe::egui;
 use gitdcy_core::{
-    clone_repo, commit, default_workspace_root, discover_entries, load_or_discover_manifest,
-    local_sync_file_enabled, push, save_manifest, set_local_sync_file, set_remote,
-    set_wip_device_trusted, set_wip_device_trusted_globally, status_all, suggested_origin_remote,
-    sync_remote_template, sync_repo, CloneRequest, Provider, RepoStatus, SyncReport,
-    WorkspaceManifest, SYNC_REMOTE,
+    add_scan_root, clone_repo, commit, default_scan_roots, default_workspace_root,
+    discover_entries, load_or_discover_manifest, local_sync_file_enabled, push, save_manifest,
+    set_local_sync_file, set_remote, set_wip_device_trusted, set_wip_device_trusted_globally,
+    set_workspace_root, status_all, suggested_origin_remote, sync_remote_template, sync_repo,
+    CloneRequest, Provider, RepoStatus, SyncReport, WorkspaceManifest, SYNC_REMOTE,
 };
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
 
@@ -27,6 +27,7 @@ fn main() -> eframe::Result<()> {
 
 struct GitDcyApp {
     manifest: WorkspaceManifest,
+    scan_roots: Vec<PathBuf>,
     statuses: Vec<RepoStatus>,
     selected: Option<usize>,
     commit_message: String,
@@ -42,12 +43,21 @@ struct GitDcyApp {
 
 enum JobResult {
     Refreshed(Result<(WorkspaceManifest, Vec<RepoStatus>), String>),
+    WorkspaceConfigured(Result<(WorkspaceManifest, Vec<RepoStatus>, Vec<PathBuf>, String), String>),
     Synced(Vec<SyncReport>),
     Committed(Result<String, String>),
     Pushed(Result<String, String>),
     RemoteSet(Result<String, String>),
     Cloned(Result<PathBuf, String>),
     Saved(Result<String, String>),
+}
+
+fn scan_roots_for_workspace(root: &Path) -> Vec<PathBuf> {
+    let mut roots = default_scan_roots();
+    if !roots.iter().any(|item| item.as_path() == root) {
+        roots.push(root.to_path_buf());
+    }
+    roots
 }
 
 impl GitDcyApp {
@@ -61,6 +71,7 @@ impl GitDcyApp {
         });
         let statuses = status_all(&manifest);
         Self {
+            scan_roots: scan_roots_for_workspace(&manifest.workspace_root),
             manifest,
             statuses,
             selected: None,
@@ -90,12 +101,23 @@ impl GitDcyApp {
         match result {
             JobResult::Refreshed(result) => match result {
                 Ok((manifest, statuses)) => {
+                    self.scan_roots = scan_roots_for_workspace(&manifest.workspace_root);
                     self.manifest = manifest;
                     self.statuses = statuses;
                     self.selected = self.selected.filter(|idx| *idx < self.statuses.len());
                     self.log("refreshed repository status");
                 }
                 Err(error) => self.log(format!("refresh failed: {error}")),
+            },
+            JobResult::WorkspaceConfigured(result) => match result {
+                Ok((manifest, statuses, scan_roots, message)) => {
+                    self.manifest = manifest;
+                    self.statuses = statuses;
+                    self.scan_roots = scan_roots;
+                    self.selected = self.selected.filter(|idx| *idx < self.statuses.len());
+                    self.log(message);
+                }
+                Err(error) => self.log(format!("workspace setup failed: {error}")),
             },
             JobResult::Synced(reports) => {
                 for report in reports {
@@ -158,10 +180,7 @@ impl GitDcyApp {
         }
         let root = self.manifest.workspace_root.clone();
         self.spawn(move || {
-            let mut roots = gitdcy_core::default_scan_roots();
-            if !roots.iter().any(|item| item == &root) {
-                roots.push(root.clone());
-            }
+            let roots = scan_roots_for_workspace(&root);
             let result = discover_entries(&roots)
                 .map(|repos| {
                     let manifest = WorkspaceManifest {
@@ -173,6 +192,97 @@ impl GitDcyApp {
                 })
                 .map_err(|error| error.to_string());
             JobResult::Refreshed(result)
+        });
+    }
+
+    fn choose_workspace_root(&mut self) {
+        if self.busy {
+            return;
+        }
+        let dialog = rfd::FileDialog::new().set_title("Choose GitDCY sync folder");
+        let dialog = if self.manifest.workspace_root.exists() {
+            dialog.set_directory(&self.manifest.workspace_root)
+        } else {
+            dialog
+        };
+        if let Some(path) = dialog.pick_folder() {
+            self.start_set_workspace_root(path);
+        }
+    }
+
+    fn choose_scan_root(&mut self) {
+        if self.busy {
+            return;
+        }
+        let dialog = rfd::FileDialog::new().set_title("Add GitDCY scan folder");
+        let dialog = if self.manifest.workspace_root.exists() {
+            dialog.set_directory(&self.manifest.workspace_root)
+        } else {
+            dialog
+        };
+        if let Some(path) = dialog.pick_folder() {
+            self.start_add_scan_root(path);
+        }
+    }
+
+    fn start_set_workspace_root(&mut self, root: PathBuf) {
+        if self.busy {
+            return;
+        }
+        self.spawn(move || {
+            let result = set_workspace_root(root.clone())
+                .and_then(|config_path| {
+                    let roots = scan_roots_for_workspace(&root);
+                    let manifest = WorkspaceManifest {
+                        workspace_root: root.clone(),
+                        repos: discover_entries(&roots)?,
+                    };
+                    save_manifest(&manifest)?;
+                    let statuses = status_all(&manifest);
+                    Ok((
+                        manifest,
+                        statuses,
+                        roots,
+                        format!(
+                            "set sync folder to {} ({})",
+                            root.display(),
+                            config_path.display()
+                        ),
+                    ))
+                })
+                .map_err(|error| error.to_string());
+            JobResult::WorkspaceConfigured(result)
+        });
+    }
+
+    fn start_add_scan_root(&mut self, path: PathBuf) {
+        if self.busy {
+            return;
+        }
+        let root = self.manifest.workspace_root.clone();
+        self.spawn(move || {
+            let result = add_scan_root(path.clone())
+                .and_then(|config_path| {
+                    let roots = scan_roots_for_workspace(&root);
+                    let manifest = WorkspaceManifest {
+                        workspace_root: root,
+                        repos: discover_entries(&roots)?,
+                    };
+                    save_manifest(&manifest)?;
+                    let statuses = status_all(&manifest);
+                    Ok((
+                        manifest,
+                        statuses,
+                        roots,
+                        format!(
+                            "added scan folder {} ({})",
+                            path.display(),
+                            config_path.display()
+                        ),
+                    ))
+                })
+                .map_err(|error| error.to_string());
+            JobResult::WorkspaceConfigured(result)
         });
     }
 
@@ -401,6 +511,15 @@ impl eframe::App for GitDcyApp {
                 ui.label(format!("Root: {}", self.manifest.workspace_root.display()));
                 ui.separator();
                 ui.add_enabled_ui(!self.busy, |ui| {
+                    if ui.button("Choose Sync Folder").clicked() {
+                        self.choose_workspace_root();
+                    }
+                    if ui.button("Add Scan Folder").clicked() {
+                        self.choose_scan_root();
+                    }
+                    if ui.button("Rediscover").clicked() {
+                        self.start_refresh_discovering();
+                    }
                     if ui.button("Refresh").clicked() {
                         self.start_refresh();
                     }
@@ -633,6 +752,38 @@ impl GitDcyApp {
     }
 
     fn clone_panel(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Workspace Folders");
+        egui::Grid::new("workspace_folder_grid")
+            .num_columns(2)
+            .striped(true)
+            .show(ui, |ui| {
+                ui.label("Sync folder");
+                ui.monospace(self.manifest.workspace_root.display().to_string());
+                ui.end_row();
+                ui.label("Scan folders");
+                ui.vertical(|ui| {
+                    for root in &self.scan_roots {
+                        ui.monospace(root.display().to_string());
+                    }
+                });
+                ui.end_row();
+            });
+
+        ui.add_enabled_ui(!self.busy, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                if ui.button("Choose Sync Folder").clicked() {
+                    self.choose_workspace_root();
+                }
+                if ui.button("Add Scan Folder").clicked() {
+                    self.choose_scan_root();
+                }
+                if ui.button("Rediscover").clicked() {
+                    self.start_refresh_discovering();
+                }
+            });
+        });
+
+        ui.add_space(18.0);
         ui.heading("Clone Repo");
         ui.label("URL");
         ui.text_edit_singleline(&mut self.clone_url);
