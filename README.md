@@ -54,12 +54,15 @@ Useful CLI checks:
 ```bash
 cargo run -p gitdcy-cli -- doctor
 cargo run -p gitdcy-cli -- status
+cargo run -p gitdcy-cli -- dashboard
 cargo run -p gitdcy-cli -- audit --all
+cargo run -p gitdcy-cli -- policy status --all
 cargo run -p gitdcy-cli -- sync --all
 ```
 
 The default workspace root is `~/Code`. On first run, if no manifest exists, the
-app scans configured roots and discovers Git repositories.
+app scans configured roots and also looks for `~/Documents/github`,
+`~/Documents/forgejo`, and `~/Documents/gitlab` when those folders exist.
 
 ## Sync Multiple Devices
 
@@ -114,6 +117,16 @@ Dirty sync uses private Git refs under `refs/gitdcy/wip/*`. GitHub and GitLab
 repos need a private `sync` remote for this. Forgejo repos can use their Forgejo
 `origin`.
 
+For terminal-first work, run:
+
+```bash
+cargo run -p gitdcy-cli -- dashboard
+```
+
+The TUI dashboard is read-focused by default: it shows all repos, dirty state,
+remotes, safety findings, and lets you refresh or sync safe repos without
+opening the GUI.
+
 ## Local Config
 
 GitDCY reads machine-local settings from the app config directory as
@@ -166,15 +179,17 @@ uses Git's normal tracked, untracked, and ignored-file rules.
 GitDCY audits commits and pushes before they enter normal branch history. Public
 targets are stricter than private repos: `AGENTS.md`, real `.env` files,
 private folders, local runtime state, logs, uploads, keys, databases, and
-generated dependency/build caches are blocked before commit or push. Repos with
-a remote named `public` are treated as public targets. GitHub and GitLab
-visibility is detected with `gh` and `glab` when available; unknown targets are
-treated as public unless overridden in local config.
+generated dependency/build caches are blocked before commit or push. Local-only
+repos and private Forgejo-style remotes are private by default. Repos with a
+remote named `public` are treated as public targets. GitHub and GitLab
+visibility is detected with `gh` and `glab` when available; unresolved hosted
+targets are treated cautiously unless overridden in local config.
 
 Run a workspace audit:
 
 ```bash
 cargo run -p gitdcy-cli -- audit --all
+cargo run -p gitdcy-cli -- audit --all --explain
 ```
 
 Install GitDCY's conservative global ignore block:
@@ -189,6 +204,18 @@ Use local-only visibility overrides for unusual remotes:
 visibility_overrides:
   github/private-app: private
   gitlab/public-export: public
+private_remote_patterns:
+  - forgejo-easy
+public_export_remotes:
+  - public
+```
+
+Check and apply repo policy drift:
+
+```bash
+cargo run -p gitdcy-cli -- policy status --all
+cargo run -p gitdcy-cli -- policy plan <repo>
+cargo run -p gitdcy-cli -- policy apply <repo>
 ```
 
 ## Build Binaries

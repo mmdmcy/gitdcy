@@ -17,31 +17,32 @@ const WIP_REMOTE: &str = "refs/remotes/sync/wip";
 const WIP_APPLIED: &str = "refs/gitdcy/applied";
 const IGNORE_BLOCK_START: &str = "# BEGIN GITDCY PRIVATE DEFAULTS";
 const IGNORE_BLOCK_END: &str = "# END GITDCY PRIVATE DEFAULTS";
-const GLOBAL_IGNORE_BLOCK: &str = r#"# BEGIN GITDCY PRIVATE DEFAULTS
-AGENTS.md
-.env
-.env.*
-!.env.example
-.codex/
-.claude/
-private/
-docs/private/
-state/
-uploads/
-logs/
-*.log
-*.sqlite
-*.sqlite3
-*.db
-*.pem
-*.key
-id_rsa
-id_ed25519
-node_modules/
-target/
-.DS_Store
-# END GITDCY PRIVATE DEFAULTS
-"#;
+const REPO_IGNORE_BLOCK_START: &str = "# BEGIN GITDCY REPO POLICY";
+const REPO_IGNORE_BLOCK_END: &str = "# END GITDCY REPO POLICY";
+const DEFAULT_REPO_IGNORE_RULES: &[&str] = &[
+    "AGENTS.md",
+    ".env",
+    ".env.*",
+    "!.env.example",
+    ".codex/",
+    ".claude/",
+    "private/",
+    "docs/private/",
+    "state/",
+    "uploads/",
+    "logs/",
+    "*.log",
+    "*.sqlite",
+    "*.sqlite3",
+    "*.db",
+    "*.pem",
+    "*.key",
+    "id_rsa",
+    "id_ed25519",
+    "node_modules/",
+    "target/",
+    ".DS_Store",
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -173,6 +174,80 @@ impl RepoSafetyReport {
         } else {
             "private-target".to_string()
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PolicySeverity {
+    Blocker,
+    Drift,
+    Info,
+}
+
+impl PolicySeverity {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Blocker => "blocker",
+            Self::Drift => "drift",
+            Self::Info => "info",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PolicyFinding {
+    pub severity: PolicySeverity,
+    pub path: Option<String>,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PolicyAction {
+    pub description: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepoPolicy {
+    pub visibility: RepoVisibility,
+    pub public_targeted: bool,
+    pub ignore_rules: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepoPolicyReport {
+    pub policy: RepoPolicy,
+    pub findings: Vec<PolicyFinding>,
+    pub actions: Vec<PolicyAction>,
+}
+
+impl RepoPolicyReport {
+    pub fn drift_count(&self) -> usize {
+        self.findings
+            .iter()
+            .filter(|finding| finding.severity == PolicySeverity::Drift)
+            .count()
+    }
+
+    pub fn blocker_count(&self) -> usize {
+        self.findings
+            .iter()
+            .filter(|finding| finding.severity == PolicySeverity::Blocker)
+            .count()
+    }
+
+    pub fn short_state(&self) -> String {
+        let blockers = self.blocker_count();
+        if blockers > 0 {
+            return format!(
+                "{blockers} policy blocker{}",
+                if blockers == 1 { "" } else { "s" }
+            );
+        }
+        let drift = self.drift_count();
+        if drift > 0 {
+            return format!("{drift} drift item{}", if drift == 1 { "" } else { "s" });
+        }
+        "policy-ok".to_string()
     }
 }
 
@@ -314,6 +389,9 @@ pub struct LocalConfig {
     pub local_sync_files: Option<BTreeMap<String, Vec<String>>>,
     pub trusted_wip_devices: Option<BTreeMap<String, Vec<String>>>,
     pub visibility_overrides: Option<BTreeMap<String, VisibilityOverride>>,
+    pub private_remote_patterns: Option<Vec<String>>,
+    pub public_export_remotes: Option<Vec<String>>,
+    pub ignore_profiles: Option<BTreeMap<String, Vec<String>>>,
 }
 
 pub fn project_dirs() -> Result<ProjectDirs> {
@@ -355,7 +433,20 @@ pub fn default_scan_roots() -> Vec<PathBuf> {
         .scan_roots
         .filter(|roots| !roots.is_empty())
         .map(|roots| roots.into_iter().map(expand_home).collect())
-        .unwrap_or_else(|| vec![default_workspace_root()])
+        .unwrap_or_else(default_candidate_scan_roots)
+}
+
+fn default_candidate_scan_roots() -> Vec<PathBuf> {
+    let mut roots = vec![default_workspace_root()];
+    if let Some(home) = home_dir() {
+        for provider in ["github", "forgejo", "gitlab"] {
+            let root = home.join("Documents").join(provider);
+            if root.exists() && !roots.iter().any(|existing| existing == &root) {
+                roots.push(root);
+            }
+        }
+    }
+    roots
 }
 
 pub fn add_scan_root(root: PathBuf) -> Result<PathBuf> {
@@ -868,14 +959,22 @@ fn git_config_global_excludes_file() -> Result<Option<String>> {
 }
 
 fn merge_managed_ignore_block(existing: &str) -> String {
+    let rules: Vec<String> = DEFAULT_REPO_IGNORE_RULES
+        .iter()
+        .map(|rule| rule.to_string())
+        .collect();
+    merge_managed_block(existing, IGNORE_BLOCK_START, IGNORE_BLOCK_END, &rules)
+}
+
+fn merge_managed_block(existing: &str, start: &str, end: &str, rules: &[String]) -> String {
     let mut output = String::new();
     let mut in_managed_block = false;
     for line in existing.lines() {
-        if line.trim() == IGNORE_BLOCK_START {
+        if line.trim() == start {
             in_managed_block = true;
             continue;
         }
-        if line.trim() == IGNORE_BLOCK_END {
+        if line.trim() == end {
             in_managed_block = false;
             continue;
         }
@@ -893,7 +992,14 @@ fn merge_managed_ignore_block(existing: &str) -> String {
     if !output.is_empty() {
         output.push('\n');
     }
-    output.push_str(GLOBAL_IGNORE_BLOCK);
+    output.push_str(start);
+    output.push('\n');
+    for rule in rules {
+        output.push_str(rule);
+        output.push('\n');
+    }
+    output.push_str(end);
+    output.push('\n');
     output
 }
 
@@ -974,6 +1080,138 @@ pub fn audit_all(manifest: &WorkspaceManifest) -> Vec<(RepoEntry, Result<RepoSaf
         .collect()
 }
 
+pub fn policy_report(entry: &RepoEntry) -> Result<RepoPolicyReport> {
+    policy_report_with_config(entry, &load_local_config())
+}
+
+pub fn policy_all(manifest: &WorkspaceManifest) -> Vec<(RepoEntry, Result<RepoPolicyReport>)> {
+    manifest
+        .repos
+        .iter()
+        .filter(|repo| repo.enabled)
+        .map(|entry| (entry.clone(), policy_report(entry)))
+        .collect()
+}
+
+pub fn apply_policy(entry: &RepoEntry) -> Result<Vec<PolicyAction>> {
+    let config = load_local_config();
+    let report = policy_report_with_config(entry, &config)?;
+    let mut actions = Vec::new();
+    if report
+        .findings
+        .iter()
+        .any(|finding| finding.message.contains("missing repo ignore rule"))
+    {
+        write_repo_ignore_block(&entry.path, &report.policy.ignore_rules)?;
+        actions.push(PolicyAction {
+            description: "updated .gitignore with GitDCY repo policy block".to_string(),
+        });
+    }
+    Ok(actions)
+}
+
+fn policy_report_with_config(entry: &RepoEntry, config: &LocalConfig) -> Result<RepoPolicyReport> {
+    let remotes = remotes(&entry.path)?;
+    let visibility = classify_repo_visibility(entry, &remotes, config);
+    let public_targeted = visibility != RepoVisibility::Private;
+    let ignore_rules = repo_ignore_rules(entry, config);
+    let mut findings = Vec::new();
+    let mut actions = Vec::new();
+
+    let safety = audit_repo_with_config(entry, config)?;
+    for finding in safety.findings {
+        findings.push(PolicyFinding {
+            severity: PolicySeverity::Blocker,
+            path: finding.path,
+            message: finding.reason,
+        });
+    }
+
+    let existing_ignore = repo_ignore_lines(&entry.path)?;
+    for rule in &ignore_rules {
+        if !existing_ignore.contains(rule) {
+            findings.push(PolicyFinding {
+                severity: PolicySeverity::Drift,
+                path: Some(".gitignore".to_string()),
+                message: format!("missing repo ignore rule `{rule}`"),
+            });
+        }
+    }
+
+    if !remotes.contains_key(SYNC_REMOTE) && entry.provider != Provider::Forgejo {
+        findings.push(PolicyFinding {
+            severity: PolicySeverity::Info,
+            path: None,
+            message: "no private sync remote configured for WIP refs".to_string(),
+        });
+    }
+
+    if findings
+        .iter()
+        .any(|finding| finding.message.contains("missing repo ignore rule"))
+    {
+        actions.push(PolicyAction {
+            description: "write or refresh GitDCY repo policy block in .gitignore".to_string(),
+        });
+    }
+
+    Ok(RepoPolicyReport {
+        policy: RepoPolicy {
+            visibility,
+            public_targeted,
+            ignore_rules,
+        },
+        findings,
+        actions,
+    })
+}
+
+fn repo_ignore_rules(entry: &RepoEntry, config: &LocalConfig) -> Vec<String> {
+    let mut rules: Vec<String> = DEFAULT_REPO_IGNORE_RULES
+        .iter()
+        .map(|rule| rule.to_string())
+        .collect();
+    if let Some(profiles) = &config.ignore_profiles {
+        let repo_name = entry
+            .path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("");
+        for key in ["*", entry.provider.folder(), entry.id.as_str(), repo_name] {
+            if let Some(values) = profiles.get(key) {
+                rules.extend(values.iter().cloned());
+            }
+        }
+    }
+    rules.sort();
+    rules.dedup();
+    rules
+}
+
+fn repo_ignore_lines(repo: &Path) -> Result<BTreeSet<String>> {
+    let path = repo.join(".gitignore");
+    let text = fs::read_to_string(&path).unwrap_or_default();
+    Ok(text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(ToOwned::to_owned)
+        .collect())
+}
+
+fn write_repo_ignore_block(repo: &Path, rules: &[String]) -> Result<()> {
+    let path = repo.join(".gitignore");
+    let existing = fs::read_to_string(&path).unwrap_or_default();
+    let merged = merge_managed_block(
+        &existing,
+        REPO_IGNORE_BLOCK_START,
+        REPO_IGNORE_BLOCK_END,
+        rules,
+    );
+    fs::write(&path, merged).with_context(|| format!("write {}", path.display()))?;
+    Ok(())
+}
+
 fn audit_repo_with_config(entry: &RepoEntry, config: &LocalConfig) -> Result<RepoSafetyReport> {
     let remotes = remotes(&entry.path)?;
     let visibility = classify_repo_visibility(entry, &remotes, config);
@@ -1019,12 +1257,22 @@ fn classify_repo_visibility(
         };
     }
 
-    if remotes.keys().any(|name| name == "public") {
+    if remotes
+        .keys()
+        .any(|name| public_export_remote_name(name, config))
+    {
         return RepoVisibility::Public;
     }
 
-    let mut saw_unknown = remotes.is_empty();
+    if remotes.is_empty() {
+        return RepoVisibility::Private;
+    }
+
+    let mut saw_unknown = false;
     for url in remotes.values() {
+        if private_remote_url(url, config) {
+            continue;
+        }
         match remote_url_visibility(url) {
             Some(RepoVisibility::Public) => return RepoVisibility::Public,
             Some(RepoVisibility::Private) => {}
@@ -1037,6 +1285,36 @@ fn classify_repo_visibility(
     } else {
         RepoVisibility::Private
     }
+}
+
+fn public_export_remote_name(name: &str, config: &LocalConfig) -> bool {
+    if name == "public" {
+        return true;
+    }
+    config
+        .public_export_remotes
+        .as_ref()
+        .is_some_and(|remotes| remotes.iter().any(|remote| remote == name))
+}
+
+fn private_remote_url(url: &str, config: &LocalConfig) -> bool {
+    let lower = url.to_ascii_lowercase();
+    if Provider::from_url(url) == Provider::Forgejo {
+        return true;
+    }
+    private_remote_patterns(config)
+        .iter()
+        .any(|pattern| lower.contains(&pattern.to_ascii_lowercase()))
+}
+
+fn private_remote_patterns(config: &LocalConfig) -> Vec<String> {
+    let mut patterns = vec!["forgejo".to_string(), "forgejo-easy".to_string()];
+    if let Some(configured) = &config.private_remote_patterns {
+        patterns.extend(configured.iter().cloned());
+    }
+    patterns.sort();
+    patterns.dedup();
+    patterns
 }
 
 fn visibility_override(entry: &RepoEntry, config: &LocalConfig) -> Option<VisibilityOverride> {
@@ -2059,7 +2337,29 @@ fn merge_local_config(mut base: LocalConfig, next: LocalConfig) -> LocalConfig {
             .get_or_insert_with(BTreeMap::new)
             .extend(next_overrides);
     }
+    if next.private_remote_patterns.is_some() {
+        merge_optional_list(
+            &mut base.private_remote_patterns,
+            next.private_remote_patterns.unwrap_or_default(),
+        );
+    }
+    if next.public_export_remotes.is_some() {
+        merge_optional_list(
+            &mut base.public_export_remotes,
+            next.public_export_remotes.unwrap_or_default(),
+        );
+    }
+    if let Some(next_profiles) = next.ignore_profiles {
+        merge_list_map(&mut base.ignore_profiles, next_profiles);
+    }
     base
+}
+
+fn merge_optional_list(base: &mut Option<Vec<String>>, mut next: Vec<String>) {
+    let base = base.get_or_insert_with(Vec::new);
+    base.append(&mut next);
+    base.sort();
+    base.dedup();
 }
 
 fn merge_list_map(
@@ -2474,6 +2774,63 @@ mod tests {
                 .unwrap();
         assert_eq!(report.visibility, RepoVisibility::Public);
         assert!(report.has_fatal_findings(), "{report:?}");
+    }
+
+    #[test]
+    fn local_only_repo_is_private_by_default() {
+        let fixture = GitFixture::new("local_only_private");
+        let repo = fixture.clone_repo("repo");
+        run(&repo, ["remote", "remove", "origin"]);
+        fs::write(repo.join("AGENTS.md"), "private agent routing\n").unwrap();
+        run(&repo, ["add", "-f", "AGENTS.md"]);
+
+        let report =
+            audit_repo_with_config(&entry("github/fixture", &repo), &LocalConfig::default())
+                .unwrap();
+        assert_eq!(report.visibility, RepoVisibility::Private);
+        assert!(!report.has_fatal_findings(), "{report:?}");
+    }
+
+    #[test]
+    fn forgejo_style_remote_is_private_by_default() {
+        let fixture = GitFixture::new("forgejo_private");
+        let repo = fixture.clone_repo("repo");
+        run(
+            &repo,
+            [
+                "remote",
+                "set-url",
+                "origin",
+                "ssh://git@forgejo-easy/nerv/repo.git",
+            ],
+        );
+        fs::write(repo.join("AGENTS.md"), "private agent routing\n").unwrap();
+        run(&repo, ["add", "-f", "AGENTS.md"]);
+
+        let report =
+            audit_repo_with_config(&entry("forgejo/fixture", &repo), &LocalConfig::default())
+                .unwrap();
+        assert_eq!(report.visibility, RepoVisibility::Private);
+        assert!(!report.has_fatal_findings(), "{report:?}");
+    }
+
+    #[test]
+    fn policy_report_and_apply_repo_ignore_block_are_idempotent() {
+        let fixture = GitFixture::new("policy_ignore");
+        let repo = fixture.clone_repo("repo");
+        let entry = entry("github/fixture", &repo);
+
+        let report = policy_report_with_config(&entry, &LocalConfig::default()).unwrap();
+        assert!(report.drift_count() > 0, "{report:?}");
+
+        write_repo_ignore_block(&repo, &report.policy.ignore_rules).unwrap();
+        let after = fs::read_to_string(repo.join(".gitignore")).unwrap();
+        write_repo_ignore_block(&repo, &report.policy.ignore_rules).unwrap();
+        let after_second = fs::read_to_string(repo.join(".gitignore")).unwrap();
+        assert_eq!(after, after_second);
+
+        let report = policy_report_with_config(&entry, &LocalConfig::default()).unwrap();
+        assert_eq!(report.drift_count(), 0, "{report:?}");
     }
 
     #[test]

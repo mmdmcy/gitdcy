@@ -11,4 +11,6 @@ path = "src/main.rs"
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
+crossterm.workspace = true
 gitdcy-core = { path = "../gitdcy-core" }
+ratatui.workspace = true

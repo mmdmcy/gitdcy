@@ -9,6 +9,9 @@
 # Extra roots to scan when no saved manifest exists.
 # scan_roots:
 #   - ~/Code
+#   - ~/Documents/github
+#   - ~/Documents/forgejo
+#   - ~/Documents/gitlab
 
 # Optional template used by the GUI when suggesting a private sync remote.
 # Supported placeholders: {repo}, {id}
@@ -37,3 +40,26 @@
 #     - laptop-name
 #   github/my-app:
 #     - laptop-name
+
+# Optional visibility policy. Local-only repos and private Forgejo-style remotes
+# are private by default. A remote named "public" is always public-targeted.
+# visibility_overrides:
+#   github/private-app: private
+#   gitlab/public-export: public
+
+# Optional remote URL fragments that should be treated as private remotes.
+# private_remote_patterns:
+#   - forgejo-easy
+#   - git.internal
+
+# Optional remote names that should be treated as public export targets.
+# public_export_remotes:
+#   - public
+
+# Optional ignore profile additions. "*" applies to every repo; provider names,
+# repo ids, and repo folder names are also supported.
+# ignore_profiles:
+#   "*":
+#     - .idea/
+#   github/my-app:
+#     - local-output/

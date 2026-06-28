@@ -4,3 +4,28 @@
 .gitdcy.local.yaml
 workspace.local.yaml
 *.log
+
+# BEGIN GITDCY REPO POLICY
+!.env.example
+*.db
+*.key
+*.log
+*.pem
+*.sqlite
+*.sqlite3
+.DS_Store
+.claude/
+.codex/
+.env
+.env.*
+AGENTS.md
+docs/private/
+id_ed25519
+id_rsa
+logs/
+node_modules/
+private/
+state/
+target/
+uploads/
+# END GITDCY REPO POLICY
