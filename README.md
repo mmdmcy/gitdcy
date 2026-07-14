@@ -60,6 +60,17 @@ cargo run -p gitdcy-cli -- policy status --all
 cargo run -p gitdcy-cli -- sync --all
 ```
 
+To put the CLI on `PATH` from this checkout, install the CLI crate rather than
+the virtual workspace root:
+
+```bash
+cargo install --locked --path crates/gitdcy-cli
+gitdcy doctor
+```
+
+Run the same install command again after pulling CLI updates. Remove it with
+`cargo uninstall gitdcy-cli`.
+
 The default workspace root is `~/Code`. On first run, if no manifest exists, the
 app scans configured roots and also looks for `~/Documents/github`,
 `~/Documents/forgejo`, and `~/Documents/gitlab` when those folders exist.
