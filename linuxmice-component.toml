@@ -1,0 +1,40 @@
+schema_version = "linuxmice.component.v1"
+id = "katteke.gitdcy"
+display_name = "GitDCY"
+version = "0.1.0"
+summary = "Standalone Git lifecycle tool exposed to LinuxMice through a read-only status contract."
+component_type = "integration"
+standalone = true
+platforms = ["linux"]
+documentation = "https://docs.katteke.com/products/gitdcy/"
+
+[installation]
+package = "gitdcy"
+
+[capabilities]
+provides = ["git.status.read"]
+requires = []
+optional = ["hub.catalog"]
+
+[interfaces]
+mode = "command"
+commands = ["/usr/bin/gitdcy status --format json"]
+endpoints = []
+
+[authentication]
+required = []
+optional = []
+provides = []
+
+[data]
+ownership = "GitDCY reads repository metadata; each repository owner retains data ownership."
+backup_responsibility = "Repository owners back up repositories; GitDCY owns no shared database."
+
+[health]
+kind = "command"
+read_only = true
+timeout_ms = 1500
+
+[health.command]
+executable = "/usr/bin/gitdcy"
+args = ["status", "--format", "json"]

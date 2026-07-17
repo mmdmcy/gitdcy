@@ -14,3 +14,5 @@ clap.workspace = true
 crossterm.workspace = true
 gitdcy-core = { path = "../gitdcy-core" }
 ratatui.workspace = true
+serde.workspace = true
+serde_json.workspace = true

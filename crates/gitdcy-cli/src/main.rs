@@ -24,6 +24,10 @@ use std::io;
 use std::path::PathBuf;
 use std::time::Duration;
 
+mod status;
+
+use status::{status, OutputFormat};
+
 #[derive(Debug, Parser)]
 #[command(name = "gitdcy")]
 #[command(about = "Private Git-only multi-device workspace client")]
@@ -35,7 +39,10 @@ struct Args {
 #[derive(Debug, Subcommand)]
 enum Command {
     Doctor,
-    Status,
+    Status {
+        #[arg(long, value_enum, default_value = "human")]
+        format: OutputFormat,
+    },
     Dashboard,
     Audit {
         #[arg(long)]
@@ -130,7 +137,7 @@ fn main() -> Result<()> {
     let args = Args::parse();
     match args.command {
         Command::Doctor => doctor(),
-        Command::Status => status(),
+        Command::Status { format } => status(format),
         Command::Dashboard => dashboard(),
         Command::Audit { all, explain, repo } => audit(all, explain, repo),
         Command::Policy { command } => policy(command),
@@ -231,20 +238,6 @@ fn doctor() -> Result<()> {
                 status.short_state()
             );
         }
-    }
-    Ok(())
-}
-
-fn status() -> Result<()> {
-    let manifest = load_or_discover_manifest()?;
-    for status in status_all(&manifest) {
-        let branch = status.branch.as_deref().unwrap_or("-");
-        println!(
-            "{:<34} {:<28} {}",
-            status.entry.id,
-            branch,
-            status.short_state()
-        );
     }
     Ok(())
 }
@@ -507,10 +500,8 @@ fn run_dashboard(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Resul
                 statuses = status_all(&manifest);
                 log = "refreshed".to_string();
             }
-            KeyCode::Down | KeyCode::Char('j') => {
-                if selected + 1 < statuses.len() {
-                    selected += 1;
-                }
+            KeyCode::Down | KeyCode::Char('j') if selected + 1 < statuses.len() => {
+                selected += 1;
             }
             KeyCode::Up | KeyCode::Char('k') => {
                 selected = selected.saturating_sub(1);

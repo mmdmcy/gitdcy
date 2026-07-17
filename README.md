@@ -54,11 +54,21 @@ Useful CLI checks:
 ```bash
 cargo run -p gitdcy-cli -- doctor
 cargo run -p gitdcy-cli -- status
+cargo run -p gitdcy-cli -- status --format json
 cargo run -p gitdcy-cli -- dashboard
 cargo run -p gitdcy-cli -- audit --all
 cargo run -p gitdcy-cli -- policy status --all
 cargo run -p gitdcy-cli -- sync --all
 ```
+
+`status --format json` is a read-only integration surface. It emits the
+versioned `linuxmice.response.v1` envelope and deliberately omits remote URLs,
+WIP object identifiers, and file contents. The default `status` output remains
+the compact human-readable table.
+
+`linuxmice-component.toml` declares this optional read-only contract to a
+LinuxMice catalog. GitDCY remains independently usable and does not require a
+hub, shared identity service, or shared database.
 
 To put the CLI on `PATH` from this checkout, install the CLI crate rather than
 the virtual workspace root:
