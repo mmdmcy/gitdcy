@@ -70,6 +70,44 @@ the compact human-readable table.
 LinuxMice catalog. GitDCY remains independently usable and does not require a
 hub, shared identity service, or shared database.
 
+LinuxMice consumes this surface through `lmice workspace status --provider
+gitdcy`. The adapter validates the envelope and retains aggregate counts only;
+repository IDs, absolute paths, branches, provider warnings, and raw errors stay
+local to GitDCY. The component health probe uses `gitdcy --help` so catalog
+health does not trigger a potentially long workspace scan.
+
+On Linux, that integration marks the invocation as read-only. GitDCY then
+bounds each internal Git metadata command to two seconds and 256 KiB per output
+stream through a process-group/cancellation-aware runner with parent-death
+signaling, and uses at most eight status workers across at most 128
+repositories. This marker is not set for standalone or mutating GitDCY
+workflows. Read-only workers run in batches with a 15-second wall-clock budget;
+late repositories become structured partial-status errors rather than blocking
+the full inventory. If a batch exceeds that budget, later batches are not
+started, so timed-out workers cannot accumulate across the scan.
+The marked path also avoids `gh`/`glab` visibility lookups and hostname command
+fallback, disables Git lazy fetching, and keeps LinuxMice aggregate status local
+and network-free. LinuxMice also restricts allowed Git protocols to `file`, so
+older Git versions that ignore `GIT_NO_LAZY_FETCH` still cannot lazily contact
+SSH, HTTPS, or Git remotes.
+Repository discovery skips directory symlinks and generated trees and enforces
+directory, repository, and cooperative time limits on responsive local
+filesystems. A LinuxMice-marked invocation without a saved manifest additionally
+uses one-level fallback discovery under
+`~/Documents/{github,gitlab,forgejo}` and does not implicitly scan the legacy
+`~/Code` candidate; deeper or additional roots require an explicit GitDCY
+manifest. Provider-local scan-root overrides are not consumed by this
+no-manifest LinuxMice fallback. Standalone discovery keeps its prior deep-scan
+behavior within the common safety limits.
+
+LinuxMice does not schedule GitDCY sync, commit, push, policy, trust, clone, or
+remote mutations. Those remain explicit GitDCY workflows until their locking,
+multi-generation WIP refs, remote privacy, device provenance, and structured
+blocked/failure contracts are hardened for unattended use. LinuxMice mutation
+eligibility also requires safety snapshots to exclude ignored/private-file
+payloads; `.env`, `.gitpriv/`, and similar data must use a separate encrypted
+private-file contract rather than Git WIP refs.
+
 To put the CLI on `PATH` from this checkout, install the CLI crate rather than
 the virtual workspace root:
 

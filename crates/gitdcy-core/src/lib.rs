@@ -8,7 +8,9 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+mod process;
 
 pub const APP_NAME: &str = "GitDCY";
 pub const SYNC_REMOTE: &str = "sync";
@@ -19,6 +21,14 @@ const IGNORE_BLOCK_START: &str = "# BEGIN GITDCY PRIVATE DEFAULTS";
 const IGNORE_BLOCK_END: &str = "# END GITDCY PRIVATE DEFAULTS";
 const REPO_IGNORE_BLOCK_START: &str = "# BEGIN GITDCY REPO POLICY";
 const REPO_IGNORE_BLOCK_END: &str = "# END GITDCY REPO POLICY";
+const DISCOVERY_MAX_DIRECTORIES: usize = 100_000;
+const DISCOVERY_MAX_REPOSITORIES: usize = 512;
+const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(10);
+const LINUXMICE_GIT_OUTPUT_LIMIT: usize = 256 * 1024;
+const LINUXMICE_GIT_TIMEOUT: Duration = Duration::from_secs(2);
+const LINUXMICE_REPOSITORY_BATCH_TIMEOUT: Duration = Duration::from_secs(15);
+const LINUXMICE_STATUS_WORKERS: usize = 8;
+const LINUXMICE_STATUS_REPOSITORIES: usize = 128;
 const DEFAULT_REPO_IGNORE_RULES: &[&str] = &[
     "AGENTS.md",
     ".env",
@@ -437,7 +447,11 @@ pub fn default_scan_roots() -> Vec<PathBuf> {
 }
 
 fn default_candidate_scan_roots() -> Vec<PathBuf> {
-    let mut roots = vec![default_workspace_root()];
+    let mut roots = if linuxmice_read_only_status() {
+        Vec::new()
+    } else {
+        vec![default_workspace_root()]
+    };
     if let Some(home) = home_dir() {
         for provider in ["github", "forgejo", "gitlab"] {
             let root = home.join("Documents").join(provider);
@@ -560,9 +574,14 @@ pub fn load_or_discover_manifest() -> Result<WorkspaceManifest> {
         return Ok(manifest);
     }
 
+    let scan_roots = if linuxmice_read_only_status() {
+        default_candidate_scan_roots()
+    } else {
+        default_scan_roots()
+    };
     Ok(WorkspaceManifest {
         workspace_root: default_workspace_root(),
-        repos: discover_entries(&default_scan_roots())?,
+        repos: discover_entries(&scan_roots)?,
     })
 }
 
@@ -580,15 +599,18 @@ pub fn save_manifest(manifest: &WorkspaceManifest) -> Result<()> {
 pub fn discover_entries(roots: &[PathBuf]) -> Result<Vec<RepoEntry>> {
     let mut repos = Vec::new();
     let mut seen = BTreeSet::new();
+    let mut budget = DiscoveryBudget::new();
 
     for root in roots {
-        for repo in discover_repo_paths(root)? {
+        for repo in discover_repo_paths_with_budget(root, &mut budget)? {
+            budget.check_time()?;
             let canonical = repo.canonicalize().unwrap_or_else(|_| repo.clone());
             if !seen.insert(canonical) {
                 continue;
             }
 
             let remotes = remotes(&repo).unwrap_or_default();
+            budget.check_time()?;
             let origin = remotes.get("origin").cloned();
             let provider = origin
                 .as_deref()
@@ -608,6 +630,7 @@ pub fn discover_entries(roots: &[PathBuf]) -> Result<Vec<RepoEntry>> {
 
             entry.review_required =
                 entry.primary_remote.is_none() && suggested_origin_remote(&entry).is_none();
+            budget.check_time()?;
 
             repos.push(entry);
         }
@@ -618,14 +641,96 @@ pub fn discover_entries(roots: &[PathBuf]) -> Result<Vec<RepoEntry>> {
 }
 
 pub fn discover_repo_paths(root: &Path) -> Result<Vec<PathBuf>> {
+    discover_repo_paths_with_budget(root, &mut DiscoveryBudget::new())
+}
+
+struct DiscoveryBudget {
+    directories: usize,
+    repositories: usize,
+    deadline: Instant,
+    max_depth: usize,
+    max_repositories: usize,
+}
+
+impl DiscoveryBudget {
+    fn new() -> Self {
+        Self::for_mode(linuxmice_read_only_status())
+    }
+
+    fn for_mode(linuxmice_read_only: bool) -> Self {
+        Self {
+            directories: 0,
+            repositories: 0,
+            deadline: Instant::now() + DISCOVERY_TIMEOUT,
+            max_depth: if linuxmice_read_only { 1 } else { usize::MAX },
+            max_repositories: if linuxmice_read_only {
+                LINUXMICE_STATUS_REPOSITORIES
+            } else {
+                DISCOVERY_MAX_REPOSITORIES
+            },
+        }
+    }
+
+    fn check_time(&self) -> Result<()> {
+        if Instant::now() >= self.deadline {
+            bail!("repository discovery exceeded its time safety limit");
+        }
+        Ok(())
+    }
+
+    fn enter_directory(&mut self) -> Result<()> {
+        self.check_time()?;
+        self.directories = self
+            .directories
+            .checked_add(1)
+            .ok_or_else(|| anyhow!("repository discovery directory count overflow"))?;
+        if self.directories > DISCOVERY_MAX_DIRECTORIES {
+            bail!("repository discovery exceeded its directory safety limit");
+        }
+        Ok(())
+    }
+
+    fn record_repository(&mut self) -> Result<()> {
+        self.repositories = self
+            .repositories
+            .checked_add(1)
+            .ok_or_else(|| anyhow!("repository discovery count overflow"))?;
+        if self.repositories > self.max_repositories {
+            bail!("repository discovery exceeded its repository safety limit");
+        }
+        Ok(())
+    }
+}
+
+fn discover_repo_paths_with_budget(
+    root: &Path,
+    budget: &mut DiscoveryBudget,
+) -> Result<Vec<PathBuf>> {
     let mut found = Vec::new();
     if !root.exists() {
         return Ok(found);
     }
 
-    fn visit(dir: &Path, found: &mut Vec<PathBuf>) -> Result<()> {
+    fn visit(
+        dir: &Path,
+        depth: usize,
+        found: &mut Vec<PathBuf>,
+        budget: &mut DiscoveryBudget,
+    ) -> Result<()> {
+        budget.enter_directory()?;
+        let metadata = match fs::symlink_metadata(dir) {
+            Ok(metadata) => metadata,
+            Err(_) => return Ok(()),
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Ok(());
+        }
         if dir.join(".git").exists() {
+            budget.record_repository()?;
             found.push(dir.to_path_buf());
+            return Ok(());
+        }
+        if depth >= budget.max_depth {
             return Ok(());
         }
 
@@ -635,20 +740,25 @@ pub fn discover_repo_paths(root: &Path) -> Result<Vec<PathBuf>> {
         };
 
         for entry in entries {
+            budget.check_time()?;
             let entry = match entry {
                 Ok(entry) => entry,
                 Err(_) => continue,
             };
             let path = entry.path();
-            if !path.is_dir() || should_skip_dir(&path) {
+            let file_type = match entry.file_type() {
+                Ok(file_type) => file_type,
+                Err(_) => continue,
+            };
+            if !file_type.is_dir() || should_skip_dir(&path) {
                 continue;
             }
-            visit(&path, found)?;
+            visit(&path, depth + 1, found, budget)?;
         }
         Ok(())
     }
 
-    visit(root, &mut found)?;
+    visit(root, 0, &mut found, budget)?;
     Ok(found)
 }
 
@@ -673,21 +783,25 @@ fn should_skip_dir(path: &Path) -> bool {
 pub fn repo_status(entry: &RepoEntry) -> RepoStatus {
     match repo_status_result(entry) {
         Ok(status) => status,
-        Err(error) => RepoStatus {
-            entry: entry.clone(),
-            path: entry.path.clone(),
-            branch: None,
-            tracking_branch: None,
-            remotes: BTreeMap::new(),
-            dirty_paths: Vec::new(),
-            ahead: None,
-            behind: None,
-            incoming_wip: None,
-            incoming_wip_trusted: true,
-            outgoing_wip: None,
-            safety: RepoSafetyReport::ok(RepoVisibility::Unknown, true),
-            last_error: Some(error.to_string()),
-        },
+        Err(error) => failed_repo_status(entry, error.to_string()),
+    }
+}
+
+fn failed_repo_status(entry: &RepoEntry, error: String) -> RepoStatus {
+    RepoStatus {
+        entry: entry.clone(),
+        path: entry.path.clone(),
+        branch: None,
+        tracking_branch: None,
+        remotes: BTreeMap::new(),
+        dirty_paths: Vec::new(),
+        ahead: None,
+        behind: None,
+        incoming_wip: None,
+        incoming_wip_trusted: true,
+        outgoing_wip: None,
+        safety: RepoSafetyReport::ok(RepoVisibility::Unknown, true),
+        last_error: Some(error),
     }
 }
 
@@ -732,12 +846,84 @@ pub fn repo_status_result(entry: &RepoEntry) -> Result<RepoStatus> {
 }
 
 pub fn status_all(manifest: &WorkspaceManifest) -> Vec<RepoStatus> {
-    manifest
+    status_all_for_mode(manifest, linuxmice_read_only_status())
+}
+
+fn status_all_for_mode(manifest: &WorkspaceManifest, linuxmice_read_only: bool) -> Vec<RepoStatus> {
+    let entries = manifest
         .repos
         .iter()
         .filter(|repo| repo.enabled)
-        .map(repo_status)
-        .collect()
+        .cloned()
+        .collect::<Vec<_>>();
+    if !linuxmice_read_only {
+        return entries.iter().map(repo_status).collect();
+    }
+
+    let mut statuses = std::iter::repeat_with(|| None)
+        .take(entries.len())
+        .collect::<Vec<Option<RepoStatus>>>();
+    let processable = entries.len().min(LINUXMICE_STATUS_REPOSITORIES);
+    for (batch_number, batch) in entries[..processable]
+        .chunks(LINUXMICE_STATUS_WORKERS)
+        .enumerate()
+    {
+        let first_index = batch_number * LINUXMICE_STATUS_WORKERS;
+        let (sender, receiver) = std::sync::mpsc::channel();
+        for (offset, entry) in batch.iter().cloned().enumerate() {
+            let sender = sender.clone();
+            std::thread::spawn(move || {
+                let _ = sender.send((first_index + offset, repo_status(&entry)));
+            });
+        }
+        drop(sender);
+
+        let deadline = Instant::now() + LINUXMICE_REPOSITORY_BATCH_TIMEOUT;
+        let mut batch_timed_out = false;
+        for _ in 0..batch.len() {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                batch_timed_out = true;
+                break;
+            }
+            match receiver.recv_timeout(remaining) {
+                Ok((index, status)) => statuses[index] = Some(status),
+                Err(_) => {
+                    batch_timed_out = true;
+                    break;
+                }
+            }
+        }
+        for (offset, entry) in batch.iter().enumerate() {
+            let index = first_index + offset;
+            if statuses[index].is_none() {
+                statuses[index] = Some(failed_repo_status(
+                    entry,
+                    "repository status exceeded its LinuxMice time safety limit".to_string(),
+                ));
+            }
+        }
+        if batch_timed_out {
+            for (index, entry) in entries.iter().enumerate().skip(first_index + batch.len()) {
+                statuses[index] = Some(failed_repo_status(
+                    entry,
+                    "repository status was not started after a prior batch exceeded its LinuxMice time safety limit"
+                        .to_string(),
+                ));
+            }
+            break;
+        }
+    }
+    for (index, entry) in entries.iter().enumerate().skip(processable) {
+        if statuses[index].is_none() {
+            statuses[index] = Some(failed_repo_status(
+                entry,
+                "repository status was not started because the LinuxMice repository safety limit was reached"
+                    .to_string(),
+            ));
+        }
+    }
+    statuses.into_iter().map(Option::unwrap).collect()
 }
 
 pub fn sync_repo(entry: &RepoEntry) -> SyncReport {
@@ -1330,6 +1516,9 @@ fn visibility_override(entry: &RepoEntry, config: &LocalConfig) -> Option<Visibi
 }
 
 fn remote_url_visibility(url: &str) -> Option<RepoVisibility> {
+    if linuxmice_read_only_status() {
+        return None;
+    }
     if let Some(slug) = repo_slug_for_host(url, "github.com") {
         return github_repo_visibility(&slug);
     }
@@ -1682,8 +1871,11 @@ fn local_sync_file_exists(repo: &Path, path: &str) -> bool {
 }
 
 fn git_tracked_path(repo: &Path, path: &str) -> bool {
-    let output =
-        git_command_with_paths(repo, ["ls-files", "--error-unmatch"], &[path.to_string()]).output();
+    let output = git_command_output(git_command_with_paths(
+        repo,
+        ["ls-files", "--error-unmatch"],
+        &[path.to_string()],
+    ));
     output
         .map(|output| output.status.success())
         .unwrap_or(false)
@@ -1931,12 +2123,11 @@ fn unstage_ignored_paths(repo: &Path, paths: &[String]) -> Result<()> {
 }
 
 fn git_ignored_path(repo: &Path, path: &str) -> bool {
-    let output = git_command_with_paths(
+    let output = git_command_output(git_command_with_paths(
         repo,
         ["check-ignore", "--no-index", "-q"],
         &[path.to_string()],
-    )
-    .output();
+    ));
     output
         .map(|output| output.status.success())
         .unwrap_or(false)
@@ -1985,7 +2176,7 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
-    let output = git_command(repo, args).output().context("run git")?;
+    let output = git_command_output(git_command(repo, args)).context("run git")?;
     if !output.status.success() {
         bail!("{}", command_error("git", &output));
     }
@@ -1997,7 +2188,7 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
-    let output = git_command(repo, args).output().context("run git")?;
+    let output = git_command_output(git_command(repo, args)).context("run git")?;
     if !output.status.success() {
         bail!("{}", command_error("git", &output));
     }
@@ -2009,7 +2200,7 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
-    let output = git_command(repo, args).output().context("run git")?;
+    let output = git_command_output(git_command(repo, args)).context("run git")?;
     if !output.status.success() {
         bail!("{}", command_error("git", &output));
     }
@@ -2024,10 +2215,9 @@ where
     K: AsRef<OsStr>,
     V: AsRef<OsStr>,
 {
-    let output = git_command(repo, args)
-        .envs(envs)
-        .output()
-        .context("run git")?;
+    let mut command = git_command(repo, args);
+    command.envs(envs);
+    let output = git_command_output(command).context("run git")?;
     if !output.status.success() {
         bail!("{}", command_error("git", &output));
     }
@@ -2042,10 +2232,9 @@ where
     K: AsRef<OsStr>,
     V: AsRef<OsStr>,
 {
-    let output = git_command(repo, args)
-        .envs(envs)
-        .output()
-        .context("run git")?;
+    let mut command = git_command(repo, args);
+    command.envs(envs);
+    let output = git_command_output(command).context("run git")?;
     if !output.status.success() {
         bail!("{}", command_error("git", &output));
     }
@@ -2057,9 +2246,8 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
-    let output = git_command_with_paths(repo, args, paths)
-        .output()
-        .context("run git")?;
+    let output =
+        git_command_output(git_command_with_paths(repo, args, paths)).context("run git")?;
     if !output.status.success() {
         bail!("{}", command_error("git", &output));
     }
@@ -2074,10 +2262,9 @@ where
     K: AsRef<OsStr>,
     V: AsRef<OsStr>,
 {
-    let output = git_command_with_paths(repo, args, paths)
-        .envs(envs)
-        .output()
-        .context("run git")?;
+    let mut command = git_command_with_paths(repo, args, paths);
+    command.envs(envs);
+    let output = git_command_output(command).context("run git")?;
     if !output.status.success() {
         bail!("{}", command_error("git", &output));
     }
@@ -2095,6 +2282,18 @@ where
         command.arg(arg);
     }
     command
+}
+
+fn linuxmice_read_only_status() -> bool {
+    std::env::var_os("LINUXMICE_READ_ONLY_STATUS").as_deref() == Some(OsStr::new("1"))
+}
+
+fn git_command_output(mut command: Command) -> Result<std::process::Output> {
+    if linuxmice_read_only_status() {
+        process::run_bounded_command(command, LINUXMICE_GIT_OUTPUT_LIMIT, LINUXMICE_GIT_TIMEOUT)
+    } else {
+        command.output().context("run git command")
+    }
 }
 
 fn git_command_with_paths<I, S>(repo: &Path, args: I, paths: &[String]) -> Command
@@ -2250,10 +2449,14 @@ pub fn device_id() -> String {
         .ok()
         .filter(|value| !value.trim().is_empty())
         .or_else(|| {
-            Command::new("hostname")
-                .output()
-                .ok()
-                .and_then(|output| String::from_utf8(output.stdout).ok())
+            if linuxmice_read_only_status() {
+                Some("linuxmice-status".to_string())
+            } else {
+                Command::new("hostname")
+                    .output()
+                    .ok()
+                    .and_then(|output| String::from_utf8(output.stdout).ok())
+            }
         })
         .unwrap_or_else(|| "device".to_string());
     sanitize_ref_component(raw.trim())
@@ -2415,6 +2618,57 @@ fn expand_home(path: PathBuf) -> PathBuf {
 mod tests {
     use super::*;
     use std::process::Command;
+
+    #[test]
+    fn linuxmice_read_only_status_workers_preserve_manifest_order() {
+        let manifest = WorkspaceManifest {
+            workspace_root: PathBuf::from("/nonexistent"),
+            repos: vec![
+                entry("first", Path::new("/nonexistent/first")),
+                entry("second", Path::new("/nonexistent/second")),
+            ],
+        };
+        let statuses = status_all_for_mode(&manifest, true);
+        assert_eq!(statuses.len(), 2);
+        assert_eq!(statuses[0].entry.id, "first");
+        assert_eq!(statuses[1].entry.id, "second");
+        assert!(statuses.iter().all(|status| status.last_error.is_some()));
+    }
+
+    #[test]
+    fn linuxmice_fallback_discovery_is_one_level() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = env::temp_dir().join(format!("gitdcy-shallow-discovery-{unique}"));
+        let direct = root.join("direct");
+        let nested = root.join("group").join("nested");
+        fs::create_dir_all(direct.join(".git")).unwrap();
+        fs::create_dir_all(nested.join(".git")).unwrap();
+        let mut budget = DiscoveryBudget::for_mode(true);
+        let found = discover_repo_paths_with_budget(&root, &mut budget).unwrap();
+        assert_eq!(found, vec![direct]);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn repository_discovery_does_not_follow_directory_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = env::temp_dir().join(format!("gitdcy-discovery-{unique}"));
+        let repository = root.join("repository");
+        fs::create_dir_all(repository.join(".git")).unwrap();
+        symlink(&root, root.join("loop")).unwrap();
+        let found = discover_repo_paths(&root).unwrap();
+        assert_eq!(found, vec![repository]);
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn parses_porcelain_tracked_and_new_paths() {
