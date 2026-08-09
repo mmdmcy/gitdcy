@@ -33,8 +33,8 @@ backup_responsibility = "Repository owners back up repositories; GitDCY owns no 
 [health]
 kind = "command"
 read_only = true
-timeout_ms = 1500
+timeout_ms = 3000
 
 [health.command]
 executable = "/usr/bin/gitdcy"
-args = ["status", "--format", "json"]
+args = ["--help"]

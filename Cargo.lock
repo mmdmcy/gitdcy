@@ -1507,6 +1507,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "directories",
+ "libc",
  "serde",
  "serde_norway",
  "thiserror 2.0.18",
