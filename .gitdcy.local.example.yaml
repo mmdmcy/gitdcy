@@ -6,6 +6,35 @@
 
 # workspace_root: ~/Code
 
+# Fail closed for GitDCY writes when identity profiles are present. GitDCY
+# never changes a repository's Git identity automatically; it only detects and
+# blocks a mismatch before commit, push, sync, or clone.
+# require_identity: true
+
+# Each non-empty selector group on a profile is required to match. Use narrow
+# path and remote selectors for private workspaces; a provider-only profile is
+# useful for all repositories on one self-hosted Forgejo instance.
+# identity_profiles:
+#   github-main:
+#     name: YOUR_GITHUB_NAME
+#     email: YOUR_GITHUB_NOREPLY_EMAIL
+#     path_prefixes:
+#       - ~/Documents/your-private-workspace/project-a
+#     remote_patterns:
+#       - github.com/your-account/project-a
+#   github-special:
+#     name: YOUR_SPECIAL_GITHUB_NAME
+#     email: YOUR_SPECIAL_GITHUB_EMAIL
+#     path_prefixes:
+#       - ~/Documents/your-private-workspace/special-projects
+#     remote_patterns:
+#       - github-special
+#   forgejo-selfhosted:
+#     name: YOUR_FORGEJO_NAME
+#     email: YOUR_FORGEJO_EMAIL
+#     providers:
+#       - forgejo
+
 # Extra roots to scan when no saved manifest exists.
 # scan_roots:
 #   - ~/Code

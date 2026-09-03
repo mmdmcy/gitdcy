@@ -7,10 +7,10 @@ use crossterm::{
 };
 use gitdcy_core::{
     apply_policy, audit_all, audit_repo, clone_repo, commit, default_workspace_root,
-    format_audit_block, install_global_ignore_template, load_or_discover_manifest, policy_all,
-    policy_report, push, save_manifest, set_remote, set_suggested_origin_remote,
-    set_wip_device_trusted, set_wip_device_trusted_globally, status_all, sync_repo, CloneRequest,
-    Provider, RepoPolicyReport, RepoSafetyReport, RepoStatus,
+    format_audit_block, install_global_ignore_template, load_local_config,
+    load_or_discover_manifest, policy_all, policy_report, push, save_manifest, set_remote,
+    set_suggested_origin_remote, set_wip_device_trusted, set_wip_device_trusted_globally,
+    status_all, sync_repo, CloneRequest, Provider, RepoPolicyReport, RepoSafetyReport, RepoStatus,
 };
 use ratatui::{
     backend::CrosstermBackend,
@@ -44,6 +44,10 @@ enum Command {
         format: OutputFormat,
     },
     Dashboard,
+    Identity {
+        #[command(subcommand)]
+        command: IdentityCommand,
+    },
     Audit {
         #[arg(long)]
         all: bool,
@@ -114,6 +118,15 @@ enum PolicyCommand {
     },
 }
 
+#[derive(Debug, Subcommand)]
+enum IdentityCommand {
+    Status {
+        #[arg(long)]
+        all: bool,
+        repo: Option<String>,
+    },
+}
+
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum ProviderArg {
     Github,
@@ -139,6 +152,7 @@ fn main() -> Result<()> {
         Command::Doctor => doctor(),
         Command::Status { format } => status(format),
         Command::Dashboard => dashboard(),
+        Command::Identity { command } => identity(command),
         Command::Audit { all, explain, repo } => audit(all, explain, repo),
         Command::Policy { command } => policy(command),
         Command::InstallIgnore { global } => install_ignore(global),
@@ -226,11 +240,23 @@ fn doctor() -> Result<()> {
     let statuses = status_all(&manifest);
     let review = statuses
         .iter()
-        .filter(|status| status.entry.review_required || status.last_error.is_some())
+        .filter(|status| {
+            status.entry.review_required
+                || status.last_error.is_some()
+                || status.identity.is_blocking()
+        })
+        .count();
+    let identity_blocked = statuses
+        .iter()
+        .filter(|status| status.identity.is_blocking())
         .count();
     println!("review required: {review}");
+    println!("identity blocked: {identity_blocked}");
     for status in statuses {
-        if status.entry.review_required || status.last_error.is_some() {
+        if status.entry.review_required
+            || status.last_error.is_some()
+            || status.identity.is_blocking()
+        {
             println!(
                 "- {} | {} | {}",
                 status.entry.id,
@@ -240,6 +266,79 @@ fn doctor() -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn identity(command: IdentityCommand) -> Result<()> {
+    match command {
+        IdentityCommand::Status { all, repo } => identity_status(all, repo),
+    }
+}
+
+fn identity_status(all: bool, repo: Option<String>) -> Result<()> {
+    if all && repo.is_some() {
+        bail!("use either --all or a repo name, not both");
+    }
+    let manifest = load_or_discover_manifest()?;
+    let profiles = load_local_config()
+        .identity_profiles
+        .map(|profiles| profiles.len())
+        .unwrap_or(0);
+    println!("configured identity profiles: {profiles}");
+
+    let statuses = status_all(&manifest);
+    let selected = if all {
+        statuses
+    } else {
+        let repo = repo.context("pass --all or a repo id/name")?;
+        vec![statuses
+            .into_iter()
+            .find(|status| {
+                status.entry.id == repo || status.entry.id.ends_with(&format!("/{repo}"))
+            })
+            .with_context(|| format!("repo not found: {repo}"))?]
+    };
+
+    let mut blocked = 0;
+    for status in selected {
+        print_identity_status(&status);
+        if status.identity.is_blocking() {
+            blocked += 1;
+        }
+    }
+    if blocked > 0 {
+        bail!(
+            "identity check found {blocked} blocked repo{}",
+            if blocked == 1 { "" } else { "s" }
+        );
+    }
+    Ok(())
+}
+
+fn print_identity_status(status: &RepoStatus) {
+    let profile = status.identity.profile.as_deref().unwrap_or("-");
+    println!(
+        "{} | state={} | enforced={} | profile={} | expected={} | actual={}",
+        status.entry.id,
+        status.identity.state_label(),
+        status.identity.enforcement_enabled,
+        profile,
+        status.identity.expected_display(),
+        status.identity.actual_display()
+    );
+    if status.identity.committer_name != status.identity.actual_name
+        || status.identity.committer_email != status.identity.actual_email
+    {
+        println!("  committer: {}", status.identity.committer_display());
+    }
+    if !status.identity.environment_overrides.is_empty() {
+        println!(
+            "  environment overrides: {}",
+            status.identity.environment_overrides.join(", ")
+        );
+    }
+    if status.identity.state_label() != "identity-ok" {
+        println!("  {}", status.identity.message);
+    }
 }
 
 fn audit(all: bool, explain: bool, repo: Option<String>) -> Result<()> {
@@ -578,7 +677,19 @@ fn status_detail_lines(status: &RepoStatus) -> Vec<Line<'static>> {
             Span::styled("state: ", Style::default().add_modifier(Modifier::BOLD)),
             Span::raw(status.short_state()),
         ]),
+        Line::from(vec![
+            Span::styled("identity: ", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(status.identity.short_state()),
+        ]),
     ];
+    if status.identity.state_label() != "identity-ok"
+        && status.identity.state_label() != "identity-unchecked"
+    {
+        lines.push(Line::from(format!(
+            "identity note: {}",
+            status.identity.message
+        )));
+    }
     if status.remotes.is_empty() {
         lines.push(Line::from("remotes: -"));
     } else {
@@ -591,22 +702,27 @@ fn status_detail_lines(status: &RepoStatus) -> Vec<Line<'static>> {
 }
 
 fn finding_items(status: &RepoStatus) -> Vec<ListItem<'static>> {
-    if status.safety.findings.is_empty() {
-        return vec![ListItem::new("No safety findings.")];
+    let mut items = Vec::new();
+    if status.identity.state_label() != "identity-ok"
+        && status.identity.state_label() != "identity-unchecked"
+    {
+        items.push(ListItem::new(format!(
+            "[identity] {}",
+            status.identity.message
+        )));
     }
-    status
-        .safety
-        .findings
-        .iter()
-        .map(|finding| {
-            let path = finding.path.as_deref().unwrap_or("-");
-            ListItem::new(format!(
-                "[{}] {path}: {}",
-                finding.severity.label(),
-                finding.reason
-            ))
-        })
-        .collect()
+    items.extend(status.safety.findings.iter().map(|finding| {
+        let path = finding.path.as_deref().unwrap_or("-");
+        ListItem::new(format!(
+            "[{}] {path}: {}",
+            finding.severity.label(),
+            finding.reason
+        ))
+    }));
+    if items.is_empty() {
+        items.push(ListItem::new("No safety or identity findings."));
+    }
+    items
 }
 
 fn sync(all: bool, repo: Option<String>) -> Result<()> {

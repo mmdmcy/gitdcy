@@ -624,7 +624,21 @@ impl GitDcyApp {
                     status.safety.visibility.label()
                 ));
                 ui.end_row();
+                ui.label("Identity");
+                ui.monospace(status.identity.short_state());
+                ui.end_row();
+                if let Some(profile) = &status.identity.profile {
+                    ui.label("Identity Profile");
+                    ui.monospace(profile);
+                    ui.end_row();
+                }
             });
+
+        if status.identity.state_label() != "identity-ok"
+            && status.identity.state_label() != "identity-unchecked"
+        {
+            ui.label(status.identity.message.clone());
+        }
 
         if status.safety.has_fatal_findings() {
             ui.add_space(8.0);
@@ -640,26 +654,32 @@ impl GitDcyApp {
 
         ui.add_space(12.0);
         ui.horizontal_wrapped(|ui| {
-            ui.add_enabled_ui(!self.busy, |ui| {
+            ui.add_enabled_ui(!self.busy && !status.identity.is_blocking(), |ui| {
                 if ui.button("Sync").clicked() {
                     self.start_sync_selected();
                 }
             });
-            ui.add_enabled_ui(!self.busy && !status.safety.has_fatal_findings(), |ui| {
-                if ui.button("Push").clicked() {
-                    self.start_push_selected();
-                }
-            });
+            ui.add_enabled_ui(
+                !self.busy && !status.safety.has_fatal_findings() && !status.identity.is_blocking(),
+                |ui| {
+                    if ui.button("Push").clicked() {
+                        self.start_push_selected();
+                    }
+                },
+            );
         });
 
         ui.add_space(12.0);
         ui.label("Commit message");
         ui.text_edit_singleline(&mut self.commit_message);
-        ui.add_enabled_ui(!self.busy && !status.safety.has_fatal_findings(), |ui| {
-            if ui.button("Commit All Non-Ignored Changes").clicked() {
-                self.start_commit_selected();
-            }
-        });
+        ui.add_enabled_ui(
+            !self.busy && !status.safety.has_fatal_findings() && !status.identity.is_blocking(),
+            |ui| {
+                if ui.button("Commit All Non-Ignored Changes").clicked() {
+                    self.start_commit_selected();
+                }
+            },
+        );
 
         ui.add_space(12.0);
         ui.heading("Changed Files");
