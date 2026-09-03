@@ -1,10 +1,11 @@
 use eframe::egui;
 use gitdcy_core::{
-    add_scan_root, clone_repo, commit, default_scan_roots, default_workspace_root,
+    add_scan_root, check_repo, clone_repo, commit, default_scan_roots, default_workspace_root,
     discover_entries, load_or_discover_manifest, local_sync_file_enabled, push, save_manifest,
     set_local_sync_file, set_remote, set_wip_device_trusted, set_wip_device_trusted_globally,
     set_workspace_root, status_all, suggested_origin_remote, sync_remote_template, sync_repo,
-    CloneRequest, Provider, RepoStatus, SyncReport, WorkspaceManifest, SYNC_REMOTE,
+    CheckResultState, CloneRequest, Provider, RepoCheckReport, RepoStatus, SyncReport,
+    WorkspaceManifest, SYNC_REMOTE,
 };
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver};
@@ -45,6 +46,7 @@ enum JobResult {
     Refreshed(Result<(WorkspaceManifest, Vec<RepoStatus>), String>),
     WorkspaceConfigured(Result<(WorkspaceManifest, Vec<RepoStatus>, Vec<PathBuf>, String), String>),
     Synced(Vec<SyncReport>),
+    Checked(RepoCheckReport),
     Committed(Result<String, String>),
     Pushed(Result<String, String>),
     RemoteSet(Result<String, String>),
@@ -125,6 +127,7 @@ impl GitDcyApp {
                 }
                 self.start_refresh();
             }
+            JobResult::Checked(report) => self.log_check_report(report),
             JobResult::Committed(result) => match result {
                 Ok(message) => {
                     self.log(message);
@@ -312,6 +315,17 @@ impl GitDcyApp {
         self.spawn(move || JobResult::Synced(vec![sync_repo(&entry)]));
     }
 
+    fn start_check_selected(&mut self) {
+        if self.busy {
+            return;
+        }
+        let Some(entry) = self.selected_entry().cloned() else {
+            self.log("select a repo first");
+            return;
+        };
+        self.spawn(move || JobResult::Checked(check_repo(&entry)));
+    }
+
     fn start_commit_selected(&mut self) {
         if self.busy {
             return;
@@ -459,6 +473,28 @@ impl GitDcyApp {
         }
         if let Some(blocked) = report.blocked {
             self.log(format!("  blocked: {blocked}"));
+        }
+    }
+
+    fn log_check_report(&mut self, report: RepoCheckReport) {
+        self.log(format!(
+            "checks {}: {}",
+            report.state_label(),
+            report.message
+        ));
+        for result in report.results {
+            self.log(format!(
+                "  [{}] {} ({} ms): {}",
+                result.state.label(),
+                result.name,
+                result.duration_ms,
+                result.command
+            ));
+            if result.state != CheckResultState::Passed && !result.output.trim().is_empty() {
+                for line in result.output.lines() {
+                    self.log(format!("    {line}"));
+                }
+            }
         }
     }
 
@@ -657,6 +693,11 @@ impl GitDcyApp {
             ui.add_enabled_ui(!self.busy && !status.identity.is_blocking(), |ui| {
                 if ui.button("Sync").clicked() {
                     self.start_sync_selected();
+                }
+            });
+            ui.add_enabled_ui(!self.busy, |ui| {
+                if ui.button("Run Checks").clicked() {
+                    self.start_check_selected();
                 }
             });
             ui.add_enabled_ui(

@@ -59,6 +59,7 @@ cargo run -p gitdcy-cli -- dashboard
 cargo run -p gitdcy-cli -- audit --all
 cargo run -p gitdcy-cli -- policy status --all
 cargo run -p gitdcy-cli -- identity status --all
+cargo run -p gitdcy-cli -- check --all
 cargo run -p gitdcy-cli -- sync --all
 ```
 
@@ -249,6 +250,53 @@ profiles are configured, GitDCY checks them before `commit`, `push`, `sync`,
 `clone`, and origin/public-remote changes. WIP commits use the selected profile
 explicitly, so a correct ambient global identity cannot accidentally leak into
 another profile.
+
+## Optional Local CI Checks
+
+GitDCY can run explicit, machine-local check commands before a push. Check
+profiles use the same path, provider, and remote selectors as identity profiles,
+so a profile can be limited to one repository. Commands are executed directly
+from the repository root with an argument list; GitDCY does not parse or run
+GitHub Actions workflow steps and does not invoke a shell for configured
+commands.
+
+Use `check <repo>` while working on a repository, or `check --all` for the
+workspace. A matching profile with `run_before_push: true` is run automatically
+by `gitdcy push`. Push checks require a clean worktree by default so the local
+result corresponds to the commit being pushed; manual checks still run against
+the current worktree. Set `require_checks: true` to fail closed when a
+repository has no matching profile. With no profiles configured, checks remain
+disabled.
+
+Example local-only configuration:
+
+```yaml
+require_checks: false
+check_profiles:
+  rust-project:
+    path_prefixes:
+      - ~/Documents/github/my-rust-project
+    remote_patterns:
+      - github.com/your-account/my-rust-project
+    run_before_push: true
+    require_clean_worktree: true
+    checks:
+      - name: format
+        program: cargo
+        args: [fmt, --all, --check]
+      - name: clippy
+        program: cargo
+        args: [clippy, --all-targets, --all-features, --, -D, warnings]
+        timeout_seconds: 900
+      - name: tests
+        program: cargo
+        args: [test]
+```
+
+Each check has a bounded timeout and output capture. GitDCY sets `CI=true`,
+disables Git credential prompts, and keeps check output local. This catches
+known failures before a `gitdcy push`, but a direct `git push` bypasses GitDCY;
+an optional hook can be added later if that stronger boundary is wanted.
 
 ## Configure Private WIP Sync
 

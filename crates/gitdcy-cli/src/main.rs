@@ -6,11 +6,12 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use gitdcy_core::{
-    apply_policy, audit_all, audit_repo, clone_repo, commit, default_workspace_root,
+    apply_policy, audit_all, audit_repo, check_repo, clone_repo, commit, default_workspace_root,
     format_audit_block, install_global_ignore_template, load_local_config,
     load_or_discover_manifest, policy_all, policy_report, push, save_manifest, set_remote,
     set_suggested_origin_remote, set_wip_device_trusted, set_wip_device_trusted_globally,
-    status_all, sync_repo, CloneRequest, Provider, RepoPolicyReport, RepoSafetyReport, RepoStatus,
+    status_all, sync_repo, CheckResultState, CloneRequest, Provider, RepoCheckReport,
+    RepoPolicyReport, RepoSafetyReport, RepoStatus,
 };
 use ratatui::{
     backend::CrosstermBackend,
@@ -42,6 +43,11 @@ enum Command {
     Status {
         #[arg(long, value_enum, default_value = "human")]
         format: OutputFormat,
+    },
+    Check {
+        #[arg(long)]
+        all: bool,
+        repo: Option<String>,
     },
     Dashboard,
     Identity {
@@ -151,6 +157,7 @@ fn main() -> Result<()> {
     match args.command {
         Command::Doctor => doctor(),
         Command::Status { format } => status(format),
+        Command::Check { all, repo } => check(all, repo),
         Command::Dashboard => dashboard(),
         Command::Identity { command } => identity(command),
         Command::Audit { all, explain, repo } => audit(all, explain, repo),
@@ -339,6 +346,75 @@ fn print_identity_status(status: &RepoStatus) {
     if status.identity.state_label() != "identity-ok" {
         println!("  {}", status.identity.message);
     }
+}
+
+fn check(all: bool, repo: Option<String>) -> Result<()> {
+    if all && repo.is_some() {
+        bail!("use either --all or a repo name, not both");
+    }
+    let manifest = load_or_discover_manifest()?;
+    let mut failures = 0;
+
+    if all {
+        for entry in manifest.repos.iter().filter(|entry| entry.enabled) {
+            let report = check_repo(entry);
+            print_check_report(entry, &report);
+            if report.is_blocking() {
+                failures += 1;
+            }
+        }
+    } else {
+        let repo = repo.context("pass --all or a repo id/name")?;
+        let entry = manifest
+            .repos
+            .iter()
+            .find(|entry| entry.id == repo || entry.id.ends_with(&format!("/{repo}")))
+            .with_context(|| format!("repo not found: {repo}"))?;
+        let report = check_repo(entry);
+        print_check_report(entry, &report);
+        if report.is_blocking() {
+            failures += 1;
+        }
+    }
+
+    if failures > 0 {
+        bail!(
+            "checks blocked {failures} repo{}",
+            if failures == 1 { "" } else { "s" }
+        );
+    }
+    Ok(())
+}
+
+fn print_check_report(entry: &gitdcy_core::RepoEntry, report: &RepoCheckReport) {
+    let profile = report.profile.as_deref().unwrap_or("-");
+    let worktree = match report.worktree_clean {
+        Some(true) => "clean",
+        Some(false) => "dirty",
+        None => "unknown",
+    };
+    println!(
+        "{} | state={} | profile={} | worktree={}",
+        entry.id,
+        report.state_label(),
+        profile,
+        worktree
+    );
+    for result in &report.results {
+        println!(
+            "  [{}] {} ({} ms): {}",
+            result.state.label(),
+            result.name,
+            result.duration_ms,
+            result.command
+        );
+        if result.state != CheckResultState::Passed && !result.output.trim().is_empty() {
+            for line in result.output.lines() {
+                println!("    {line}");
+            }
+        }
+    }
+    println!("  {}", report.message);
 }
 
 fn audit(all: bool, explain: bool, repo: Option<String>) -> Result<()> {

@@ -35,6 +35,32 @@
 #     providers:
 #       - forgejo
 
+# Optional local CI-style checks. GitDCY runs only explicitly configured
+# programs from the repository root; it does not execute GitHub Actions files.
+# A matching profile runs before `gitdcy push` unless run_before_push is false.
+# Push checks require a clean worktree by default so they test the commit being
+# pushed. Manual `gitdcy check` runs against the current worktree.
+# require_checks: false
+# check_profiles:
+#   rust-project:
+#     path_prefixes:
+#       - ~/Documents/your-workspace/project-a
+#     remote_patterns:
+#       - github.com/your-account/project-a
+#     run_before_push: true
+#     require_clean_worktree: true
+#     checks:
+#       - name: format
+#         program: cargo
+#         args: [fmt, --all, --check]
+#       - name: clippy
+#         program: cargo
+#         args: [clippy, --all-targets, --all-features, --, -D, warnings]
+#         timeout_seconds: 900
+#       - name: tests
+#         program: cargo
+#         args: [test]
+
 # Extra roots to scan when no saved manifest exists.
 # scan_roots:
 #   - ~/Code

@@ -29,6 +29,10 @@ const LINUXMICE_GIT_TIMEOUT: Duration = Duration::from_secs(2);
 const LINUXMICE_REPOSITORY_BATCH_TIMEOUT: Duration = Duration::from_secs(15);
 const LINUXMICE_STATUS_WORKERS: usize = 8;
 const LINUXMICE_STATUS_REPOSITORIES: usize = 128;
+const CHECK_OUTPUT_LIMIT: usize = 256 * 1024;
+const CHECK_OUTPUT_DISPLAY_LIMIT: usize = 16 * 1024;
+const DEFAULT_CHECK_TIMEOUT_SECONDS: u64 = 15 * 60;
+const MAX_CHECK_TIMEOUT_SECONDS: u64 = 60 * 60;
 const DEFAULT_REPO_IGNORE_RULES: &[&str] = &[
     "AGENTS.md",
     ".env",
@@ -380,6 +384,159 @@ impl RepoIdentityReport {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckState {
+    Disabled,
+    Passed,
+    Failed,
+    TimedOut,
+    Unconfigured,
+    Ambiguous,
+    Invalid,
+    Unavailable,
+}
+
+impl CheckState {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Disabled => "checks-unchecked",
+            Self::Passed => "checks-passed",
+            Self::Failed => "checks-failed",
+            Self::TimedOut => "checks-timed-out",
+            Self::Unconfigured => "checks-not-configured",
+            Self::Ambiguous => "checks-ambiguous",
+            Self::Invalid => "checks-invalid",
+            Self::Unavailable => "checks-unavailable",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckResultState {
+    Passed,
+    Failed,
+    TimedOut,
+    Unavailable,
+}
+
+impl CheckResultState {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Passed => "passed",
+            Self::Failed => "failed",
+            Self::TimedOut => "timed out",
+            Self::Unavailable => "unavailable",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckCommand {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub program: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub timeout_seconds: Option<u64>,
+}
+
+impl CheckCommand {
+    pub fn display_command(&self) -> String {
+        std::iter::once(self.program.as_str())
+            .chain(self.args.iter().map(String::as_str))
+            .map(display_command_arg)
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckProfile {
+    #[serde(default)]
+    pub path_prefixes: Vec<PathBuf>,
+    #[serde(default)]
+    pub remote_patterns: Vec<String>,
+    #[serde(default)]
+    pub providers: Vec<Provider>,
+    #[serde(default)]
+    pub checks: Vec<CheckCommand>,
+    #[serde(default = "default_true")]
+    pub run_before_push: bool,
+    #[serde(default = "default_true")]
+    pub require_clean_worktree: bool,
+}
+
+impl Default for CheckProfile {
+    fn default() -> Self {
+        Self {
+            path_prefixes: Vec::new(),
+            remote_patterns: Vec::new(),
+            providers: Vec::new(),
+            checks: Vec::new(),
+            run_before_push: true,
+            require_clean_worktree: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckResult {
+    pub name: String,
+    pub command: String,
+    pub state: CheckResultState,
+    pub duration_ms: u128,
+    pub output: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepoCheckReport {
+    pub enforcement_enabled: bool,
+    pub state: CheckState,
+    pub profile: Option<String>,
+    pub candidates: Vec<String>,
+    pub worktree_clean: Option<bool>,
+    pub results: Vec<CheckResult>,
+    pub message: String,
+}
+
+impl RepoCheckReport {
+    pub fn is_blocking(&self) -> bool {
+        self.enforcement_enabled && self.state != CheckState::Passed
+    }
+
+    pub fn state_label(&self) -> &'static str {
+        self.state.label()
+    }
+
+    pub fn short_state(&self) -> String {
+        match self.state {
+            CheckState::Passed => self
+                .profile
+                .as_deref()
+                .map(|profile| format!("checks:{profile}"))
+                .unwrap_or_else(|| CheckState::Passed.label().to_string()),
+            state => state.label().to_string(),
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn display_command_arg(value: &str) -> String {
+    if value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ".:/_=-".contains(ch))
+    {
+        value.to_string()
+    } else {
+        format!("{:?}", value)
+    }
+}
+
 fn display_identity(name: &Option<String>, email: &Option<String>) -> String {
     match (name.as_deref(), email.as_deref()) {
         (Some(name), Some(email)) => format!("{name} <{email}>"),
@@ -539,6 +696,8 @@ pub struct LocalConfig {
     pub ignore_profiles: Option<BTreeMap<String, Vec<String>>>,
     pub require_identity: Option<bool>,
     pub identity_profiles: Option<BTreeMap<String, GitIdentityProfile>>,
+    pub require_checks: Option<bool>,
+    pub check_profiles: Option<BTreeMap<String, CheckProfile>>,
     #[serde(skip)]
     pub config_error: Option<String>,
 }
@@ -1230,6 +1389,10 @@ pub fn push(repo: &Path) -> Result<()> {
     if report.has_fatal_findings() {
         bail!("{}", format_audit_block(&entry, &report));
     }
+    let checks = check_repo_with_config(&entry, &remotes, &config, CheckTrigger::BeforePush);
+    if checks.is_blocking() {
+        bail!("{}", format_check_block(&entry, &checks));
+    }
     git(repo, ["push"])?;
     Ok(())
 }
@@ -1447,6 +1610,405 @@ pub fn identity_report(entry: &RepoEntry) -> RepoIdentityReport {
     let config = load_local_config();
     let remotes = remotes(&entry.path).unwrap_or_default();
     identity_report_with_config(entry, &remotes, &config)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CheckTrigger {
+    Manual,
+    BeforePush,
+}
+
+pub fn check_repo(entry: &RepoEntry) -> RepoCheckReport {
+    let config = load_local_config();
+    let remotes = match remotes(&entry.path) {
+        Ok(remotes) => remotes,
+        Err(error) => {
+            return RepoCheckReport {
+                enforcement_enabled: false,
+                state: CheckState::Unavailable,
+                profile: None,
+                candidates: Vec::new(),
+                worktree_clean: None,
+                results: Vec::new(),
+                message: format!("could not read repository remotes: {error}"),
+            }
+        }
+    };
+    check_repo_with_config(entry, &remotes, &config, CheckTrigger::Manual)
+}
+
+fn check_repo_with_config(
+    entry: &RepoEntry,
+    remotes: &BTreeMap<String, String>,
+    config: &LocalConfig,
+    trigger: CheckTrigger,
+) -> RepoCheckReport {
+    let require_checks = config.require_checks.unwrap_or(false);
+    let profiles = config.check_profiles.as_ref();
+    let has_profiles = profiles.is_some_and(|profiles| !profiles.is_empty());
+
+    if !has_profiles {
+        return RepoCheckReport {
+            enforcement_enabled: require_checks,
+            state: if require_checks {
+                CheckState::Unconfigured
+            } else {
+                CheckState::Disabled
+            },
+            profile: None,
+            candidates: Vec::new(),
+            worktree_clean: None,
+            results: Vec::new(),
+            message: if require_checks {
+                "check enforcement is enabled but no check profiles are configured".to_string()
+            } else {
+                "no local check profile is configured for this repository".to_string()
+            },
+        };
+    }
+
+    let profiles = profiles.expect("check profile presence checked above");
+    let mut invalid = profiles
+        .iter()
+        .filter_map(|(id, profile)| {
+            invalid_check_profile_reason(id, profile).map(|reason| format!("{id}: {reason}"))
+        })
+        .collect::<Vec<_>>();
+    if let Some(error) = &config.config_error {
+        invalid.insert(0, error.clone());
+    }
+    if !invalid.is_empty() {
+        return RepoCheckReport {
+            enforcement_enabled: true,
+            state: CheckState::Invalid,
+            profile: None,
+            candidates: Vec::new(),
+            worktree_clean: None,
+            results: Vec::new(),
+            message: format!(
+                "invalid check profile configuration: {}",
+                invalid.join("; ")
+            ),
+        };
+    }
+
+    let matching = profiles
+        .iter()
+        .filter(|(_, profile)| {
+            profile_selectors_match(
+                &profile.path_prefixes,
+                &profile.remote_patterns,
+                &profile.providers,
+                &entry.path,
+                entry.provider,
+                remotes,
+            )
+        })
+        .map(|(id, _)| id.clone())
+        .collect::<Vec<_>>();
+    let candidates = matching
+        .iter()
+        .filter(|id| {
+            trigger == CheckTrigger::Manual
+                || profiles
+                    .get(*id)
+                    .is_some_and(|profile| profile.run_before_push)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let enforcement_enabled = require_checks || !candidates.is_empty();
+
+    if candidates.len() != 1 {
+        let state = if candidates.is_empty() {
+            if enforcement_enabled {
+                CheckState::Unconfigured
+            } else {
+                CheckState::Disabled
+            }
+        } else {
+            CheckState::Ambiguous
+        };
+        let message = if candidates.is_empty() {
+            if trigger == CheckTrigger::BeforePush && !matching.is_empty() {
+                "matching check profiles are disabled before push".to_string()
+            } else {
+                "no local check profile matches this repository path, provider, and remotes"
+                    .to_string()
+            }
+        } else {
+            format!(
+                "multiple local check profiles match this repository: {}",
+                candidates.join(", ")
+            )
+        };
+        return RepoCheckReport {
+            enforcement_enabled,
+            state,
+            profile: None,
+            candidates,
+            worktree_clean: None,
+            results: Vec::new(),
+            message,
+        };
+    }
+
+    let profile_id = candidates[0].clone();
+    let profile = profiles
+        .get(&profile_id)
+        .expect("check candidate must exist");
+    let worktree_clean = worktree_is_clean(&entry.path).ok();
+    if trigger == CheckTrigger::BeforePush && profile.require_clean_worktree {
+        match worktree_clean {
+            Some(true) => {}
+            Some(false) => {
+                return RepoCheckReport {
+                    enforcement_enabled: true,
+                    state: CheckState::Failed,
+                    profile: Some(profile_id),
+                    candidates,
+                    worktree_clean,
+                    results: Vec::new(),
+                    message: "working tree is not clean; checks would not exactly match the commit being pushed".to_string(),
+                }
+            }
+            None => {
+                return RepoCheckReport {
+                    enforcement_enabled: true,
+                    state: CheckState::Unavailable,
+                    profile: Some(profile_id),
+                    candidates,
+                    worktree_clean,
+                    results: Vec::new(),
+                    message: "could not determine whether the working tree is clean".to_string(),
+                }
+            }
+        }
+    }
+
+    let mut results = Vec::new();
+    for check in &profile.checks {
+        let result = run_check_command(&entry.path, check);
+        let result_state = result.state;
+        let result_name = result.name.clone();
+        results.push(result);
+        if result_state != CheckResultState::Passed {
+            let state = match result_state {
+                CheckResultState::TimedOut => CheckState::TimedOut,
+                CheckResultState::Unavailable => CheckState::Unavailable,
+                CheckResultState::Failed => CheckState::Failed,
+                CheckResultState::Passed => CheckState::Passed,
+            };
+            return RepoCheckReport {
+                enforcement_enabled: true,
+                state,
+                profile: Some(profile_id.clone()),
+                candidates,
+                worktree_clean,
+                results,
+                message: format!("check {result_name} failed in profile {profile_id}"),
+            };
+        }
+    }
+
+    RepoCheckReport {
+        enforcement_enabled: true,
+        state: CheckState::Passed,
+        profile: Some(profile_id.clone()),
+        candidates,
+        worktree_clean,
+        results,
+        message: format!(
+            "all {} configured checks passed in profile {profile_id}",
+            profile.checks.len()
+        ),
+    }
+}
+
+fn invalid_check_profile_reason(id: &str, profile: &CheckProfile) -> Option<String> {
+    if id.trim().is_empty() {
+        return Some("profile id is empty".to_string());
+    }
+    if profile.path_prefixes.is_empty()
+        && profile.remote_patterns.is_empty()
+        && profile.providers.is_empty()
+    {
+        return Some(
+            "at least one path_prefixes, remote_patterns, or providers selector is required"
+                .to_string(),
+        );
+    }
+    if profile
+        .path_prefixes
+        .iter()
+        .map(|path| expand_home(path.clone()))
+        .any(|path| !path.is_absolute())
+    {
+        return Some("path_prefixes must be absolute paths or use ~/".to_string());
+    }
+    if profile
+        .remote_patterns
+        .iter()
+        .any(|pattern| pattern.trim().is_empty())
+    {
+        return Some("remote_patterns cannot contain empty values".to_string());
+    }
+    if profile.checks.is_empty() {
+        return Some("at least one check command is required".to_string());
+    }
+    for check in &profile.checks {
+        if check.name.trim().is_empty() {
+            return Some("check names cannot be empty".to_string());
+        }
+        if check.program.trim().is_empty() {
+            return Some(format!("check {} has no program", check.name));
+        }
+        if check.program.contains('\0') || check.args.iter().any(|arg| arg.contains('\0')) {
+            return Some(format!("check {} contains a NUL character", check.name));
+        }
+        if check
+            .timeout_seconds
+            .is_some_and(|seconds| seconds == 0 || seconds > MAX_CHECK_TIMEOUT_SECONDS)
+        {
+            return Some(format!(
+                "check {} timeout_seconds must be between 1 and {MAX_CHECK_TIMEOUT_SECONDS}",
+                check.name
+            ));
+        }
+    }
+    None
+}
+
+fn profile_selectors_match(
+    path_prefixes: &[PathBuf],
+    remote_patterns: &[String],
+    providers: &[Provider],
+    repo: &Path,
+    provider: Provider,
+    remotes: &BTreeMap<String, String>,
+) -> bool {
+    let path_matches = path_prefixes.is_empty()
+        || path_prefixes.iter().any(|prefix| {
+            let prefix = expand_home(prefix.clone());
+            let canonical_repo = repo.canonicalize().unwrap_or_else(|_| repo.to_path_buf());
+            let canonical_prefix = prefix.canonicalize().unwrap_or(prefix);
+            canonical_repo.starts_with(canonical_prefix)
+        });
+    let remote_matches = remote_patterns.is_empty()
+        || remote_patterns.iter().any(|pattern| {
+            let primary = remotes
+                .get("origin")
+                .map(|url| ("origin", url))
+                .or_else(|| remotes.get(SYNC_REMOTE).map(|url| (SYNC_REMOTE, url)));
+            primary.is_some_and(|(name, url)| remote_selector_matches(pattern, name, url))
+        });
+    let provider_matches = providers.is_empty() || providers.contains(&provider);
+    path_matches && remote_matches && provider_matches
+}
+
+fn worktree_is_clean(repo: &Path) -> Result<bool> {
+    Ok(
+        git_output(repo, ["status", "--porcelain=v1", "--untracked-files=all"])?
+            .trim()
+            .is_empty(),
+    )
+}
+
+fn run_check_command(repo: &Path, check: &CheckCommand) -> CheckResult {
+    let timeout = Duration::from_secs(
+        check
+            .timeout_seconds
+            .unwrap_or(DEFAULT_CHECK_TIMEOUT_SECONDS),
+    );
+    let mut command = Command::new(&check.program);
+    command
+        .args(&check.args)
+        .current_dir(repo)
+        .env("CI", "true")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("CARGO_TERM_COLOR", "never");
+    let started = Instant::now();
+    let command_display = check.display_command();
+    match process::run_bounded_command(command, CHECK_OUTPUT_LIMIT, timeout) {
+        Ok(output) => {
+            let duration_ms = started.elapsed().as_millis();
+            let timed_out = !output.status.success()
+                && output.status.code().is_none()
+                && started.elapsed() >= timeout;
+            let state = if output.status.success() {
+                CheckResultState::Passed
+            } else if timed_out {
+                CheckResultState::TimedOut
+            } else {
+                CheckResultState::Failed
+            };
+            let mut output_text = combined_check_output(&output);
+            if output_text.trim().is_empty() && !output.status.success() {
+                output_text = format!("process exited with {}", output.status);
+            }
+            CheckResult {
+                name: check.name.clone(),
+                command: command_display,
+                state,
+                duration_ms,
+                output: truncate_check_output(output_text),
+            }
+        }
+        Err(error) => CheckResult {
+            name: check.name.clone(),
+            command: command_display,
+            state: CheckResultState::Unavailable,
+            duration_ms: started.elapsed().as_millis(),
+            output: truncate_check_output(error.to_string()),
+        },
+    }
+}
+
+fn combined_check_output(output: &std::process::Output) -> String {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    match (stdout.trim(), stderr.trim()) {
+        ("", "") => String::new(),
+        (stdout, "") => stdout.to_string(),
+        ("", stderr) => stderr.to_string(),
+        (stdout, stderr) => format!("{stdout}\n{stderr}"),
+    }
+}
+
+fn truncate_check_output(output: String) -> String {
+    if output.len() <= CHECK_OUTPUT_DISPLAY_LIMIT {
+        return output;
+    }
+    let mut end = CHECK_OUTPUT_DISPLAY_LIMIT;
+    while !output.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}\n[check output truncated]", &output[..end])
+}
+
+pub fn format_check_block(entry: &RepoEntry, report: &RepoCheckReport) -> String {
+    let mut lines = vec![format!(
+        "GitDCY checks blocked {} ({})",
+        entry.id,
+        report.state_label()
+    )];
+    for result in &report.results {
+        if result.state == CheckResultState::Passed {
+            continue;
+        }
+        lines.push(format!(
+            "- [{}] {} ({})",
+            result.state.label(),
+            result.name,
+            result.command
+        ));
+        if !result.output.trim().is_empty() {
+            for line in result.output.lines() {
+                lines.push(format!("  {line}"));
+            }
+        }
+    }
+    lines.push(format!("- {}", report.message));
+    lines.join("\n")
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1667,23 +2229,14 @@ fn identity_profile_matches(
     provider: Provider,
     remotes: &BTreeMap<String, String>,
 ) -> bool {
-    let path_matches = profile.path_prefixes.is_empty()
-        || profile.path_prefixes.iter().any(|prefix| {
-            let prefix = expand_home(prefix.clone());
-            let canonical_repo = repo.canonicalize().unwrap_or_else(|_| repo.to_path_buf());
-            let canonical_prefix = prefix.canonicalize().unwrap_or(prefix);
-            canonical_repo.starts_with(canonical_prefix)
-        });
-    let remote_matches = profile.remote_patterns.is_empty()
-        || profile.remote_patterns.iter().any(|pattern| {
-            let primary = remotes
-                .get("origin")
-                .map(|url| ("origin", url))
-                .or_else(|| remotes.get(SYNC_REMOTE).map(|url| (SYNC_REMOTE, url)));
-            primary.is_some_and(|(name, url)| remote_selector_matches(pattern, name, url))
-        });
-    let provider_matches = profile.providers.is_empty() || profile.providers.contains(&provider);
-    path_matches && remote_matches && provider_matches
+    profile_selectors_match(
+        &profile.path_prefixes,
+        &profile.remote_patterns,
+        &profile.providers,
+        repo,
+        provider,
+        remotes,
+    )
 }
 
 fn remote_selector_matches(pattern: &str, name: &str, url: &str) -> bool {
@@ -3195,6 +3748,14 @@ fn merge_local_config(mut base: LocalConfig, next: LocalConfig) -> LocalConfig {
             .get_or_insert_with(BTreeMap::new)
             .extend(next_identities);
     }
+    if next.require_checks.is_some() {
+        base.require_checks = next.require_checks;
+    }
+    if let Some(next_checks) = next.check_profiles {
+        base.check_profiles
+            .get_or_insert_with(BTreeMap::new)
+            .extend(next_checks);
+    }
     if next.config_error.is_some() {
         base.config_error = next.config_error;
     }
@@ -3582,6 +4143,142 @@ identity_profiles:
             identity,
             "WIP Profile <wip-profile@example.invalid> WIP Profile <wip-profile@example.invalid>"
         );
+    }
+
+    #[test]
+    fn check_profiles_deserialize_with_direct_ci_commands() {
+        let config: LocalConfig = serde_norway::from_str(
+            r#"check_profiles:
+  rust-project:
+    path_prefixes:
+      - ~/Documents/example
+    remote_patterns:
+      - github.com/example/project
+    checks:
+      - name: format
+        program: cargo
+        args: [fmt, --all, --check]
+        timeout_seconds: 900
+"#,
+        )
+        .unwrap();
+
+        let profile = config
+            .check_profiles
+            .as_ref()
+            .and_then(|profiles| profiles.get("rust-project"))
+            .unwrap();
+        assert!(profile.run_before_push);
+        assert!(profile.require_clean_worktree);
+        assert_eq!(
+            profile.checks[0].display_command(),
+            "cargo fmt --all --check"
+        );
+        assert_eq!(profile.checks[0].timeout_seconds, Some(900));
+    }
+
+    #[test]
+    fn configured_checks_run_and_report_failures_without_a_shell() {
+        let fixture = GitFixture::new("checks_run");
+        let repo = fixture.clone_repo("repo");
+        let profile = CheckProfile {
+            path_prefixes: vec![fixture.root.clone()],
+            remote_patterns: vec!["origin".to_string()],
+            providers: vec![Provider::Github],
+            checks: vec![CheckCommand {
+                name: "git-status".to_string(),
+                program: "git".to_string(),
+                args: vec!["status".to_string(), "--porcelain".to_string()],
+                ..CheckCommand::default()
+            }],
+            ..CheckProfile::default()
+        };
+        let config = LocalConfig {
+            check_profiles: Some(BTreeMap::from([("checks".to_string(), profile)])),
+            ..LocalConfig::default()
+        };
+        let entry = entry("github/fixture", &repo);
+        let report = check_repo_with_config(
+            &entry,
+            &remotes(&repo).unwrap(),
+            &config,
+            CheckTrigger::Manual,
+        );
+
+        assert_eq!(report.state, CheckState::Passed, "{report:?}");
+        assert!(!report.is_blocking(), "{report:?}");
+        assert_eq!(report.results.len(), 1);
+        assert_eq!(report.results[0].state, CheckResultState::Passed);
+        assert_eq!(report.results[0].command, "git status --porcelain");
+
+        let failing_profile = CheckProfile {
+            checks: vec![CheckCommand {
+                name: "missing-branch".to_string(),
+                program: "git".to_string(),
+                args: vec![
+                    "rev-parse".to_string(),
+                    "--verify".to_string(),
+                    "refs/heads/branch-that-does-not-exist".to_string(),
+                ],
+                ..CheckCommand::default()
+            }],
+            path_prefixes: vec![fixture.root.clone()],
+            remote_patterns: vec!["origin".to_string()],
+            providers: vec![Provider::Github],
+            ..CheckProfile::default()
+        };
+        let failing_config = LocalConfig {
+            check_profiles: Some(BTreeMap::from([("checks".to_string(), failing_profile)])),
+            ..LocalConfig::default()
+        };
+        let failing_report = check_repo_with_config(
+            &entry,
+            &remotes(&repo).unwrap(),
+            &failing_config,
+            CheckTrigger::Manual,
+        );
+        assert_eq!(
+            failing_report.state,
+            CheckState::Failed,
+            "{failing_report:?}"
+        );
+        assert!(failing_report.is_blocking(), "{failing_report:?}");
+        assert!(!failing_report.results[0].output.trim().is_empty());
+    }
+
+    #[test]
+    fn push_checks_fail_closed_on_a_dirty_worktree() {
+        let fixture = GitFixture::new("checks_dirty");
+        let repo = fixture.clone_repo("repo");
+        fs::write(repo.join("pending.txt"), "not committed\n").unwrap();
+        let profile = CheckProfile {
+            path_prefixes: vec![fixture.root.clone()],
+            remote_patterns: vec!["origin".to_string()],
+            providers: vec![Provider::Github],
+            checks: vec![CheckCommand {
+                name: "status".to_string(),
+                program: "git".to_string(),
+                args: vec!["status".to_string(), "--porcelain".to_string()],
+                ..CheckCommand::default()
+            }],
+            ..CheckProfile::default()
+        };
+        let config = LocalConfig {
+            check_profiles: Some(BTreeMap::from([("checks".to_string(), profile)])),
+            ..LocalConfig::default()
+        };
+        let report = check_repo_with_config(
+            &entry("github/fixture", &repo),
+            &remotes(&repo).unwrap(),
+            &config,
+            CheckTrigger::BeforePush,
+        );
+
+        assert_eq!(report.state, CheckState::Failed, "{report:?}");
+        assert!(report.is_blocking(), "{report:?}");
+        assert_eq!(report.worktree_clean, Some(false));
+        assert!(report.results.is_empty());
+        assert!(report.message.contains("not clean"));
     }
 
     #[test]
