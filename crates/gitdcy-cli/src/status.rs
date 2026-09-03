@@ -58,6 +58,13 @@ impl StatusEnvelope {
                 if let Some(error) = &status.last_error {
                     warnings.push(format!("{}: {error}", status.entry.id));
                 }
+                if status.identity.is_blocking() {
+                    warnings.push(format!(
+                        "{}: {}",
+                        status.entry.id,
+                        status.identity.state_label()
+                    ));
+                }
                 StatusRepo::from(status)
             })
             .collect();
@@ -99,6 +106,10 @@ struct StatusRepo {
     outgoing_wip: bool,
     review_required: bool,
     safety: String,
+    identity_state: String,
+    identity_profile: Option<String>,
+    identity_enforced: bool,
+    identity_blocked: bool,
     last_error: Option<String>,
     state: String,
 }
@@ -112,6 +123,10 @@ impl From<RepoStatus> for StatusRepo {
         let review_required = status.entry.review_required;
         let safety = status.safety.short_state();
         let state = status.short_state();
+        let identity_state = status.identity.state_label().to_string();
+        let identity_profile = status.identity.profile.clone();
+        let identity_enforced = status.identity.enforcement_enabled;
+        let identity_blocked = status.identity.is_blocking();
         Self {
             id: status.entry.id,
             path: status.path.to_string_lossy().into_owned(),
@@ -126,6 +141,10 @@ impl From<RepoStatus> for StatusRepo {
             outgoing_wip,
             review_required,
             safety,
+            identity_state,
+            identity_profile,
+            identity_enforced,
+            identity_blocked,
             last_error: status.last_error,
             state,
         }
@@ -171,6 +190,10 @@ mod tests {
                     outgoing_wip: false,
                     review_required: false,
                     safety: "public-safe".into(),
+                    identity_state: "identity-unchecked".into(),
+                    identity_profile: None,
+                    identity_enforced: false,
+                    identity_blocked: false,
                     last_error: None,
                     state: "clean".into(),
                 }],
@@ -186,6 +209,12 @@ mod tests {
         assert_eq!(value["operation"], "status");
         assert_eq!(value["outcome"], "success");
         assert!(value["data"]["repos"].is_array());
+        assert_eq!(
+            value["data"]["repos"][0]["identity_state"],
+            "identity-unchecked"
+        );
+        assert_eq!(value["data"]["repos"][0]["identity_enforced"], false);
+        assert_eq!(value["data"]["repos"][0]["identity_blocked"], false);
         assert!(value["warnings"].is_array());
         assert!(value.get("error").is_some());
         assert_eq!(value["correlation_id"], "test-correlation");

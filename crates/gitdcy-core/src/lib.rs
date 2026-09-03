@@ -54,6 +54,20 @@ const DEFAULT_REPO_IGNORE_RULES: &[&str] = &[
     ".DS_Store",
 ];
 
+fn remote_host(url: &str) -> Option<String> {
+    let value = url.trim().to_ascii_lowercase();
+    let rest = value
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(value.as_str());
+    let authority = rest.split(['/', ':']).next()?;
+    let host = authority
+        .rsplit_once('@')
+        .map(|(_, host)| host)
+        .unwrap_or(authority);
+    (!host.is_empty()).then(|| host.to_string())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Provider {
@@ -87,12 +101,12 @@ impl Provider {
     }
 
     pub fn from_url(url: &str) -> Self {
-        let lower = url.to_ascii_lowercase();
-        if lower.contains("github.com") {
+        let host = remote_host(url).unwrap_or_default();
+        if host == "github.com" || host.starts_with("github-") {
             Provider::Github
-        } else if lower.contains("gitlab.com") {
+        } else if host == "gitlab.com" || host.starts_with("gitlab-") {
             Provider::Gitlab
-        } else if lower.contains("forgejo") {
+        } else if host.contains("forgejo") {
             Provider::Forgejo
         } else {
             Provider::Other
@@ -261,6 +275,120 @@ impl RepoPolicyReport {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdentityState {
+    Disabled,
+    Matched,
+    Unconfigured,
+    Ambiguous,
+    Mismatch,
+    Invalid,
+    Unavailable,
+}
+
+impl IdentityState {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Disabled => "identity-unchecked",
+            Self::Matched => "identity-ok",
+            Self::Unconfigured => "identity-not-configured",
+            Self::Ambiguous => "identity-ambiguous",
+            Self::Mismatch => "identity-mismatch",
+            Self::Invalid => "identity-invalid",
+            Self::Unavailable => "identity-unavailable",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitIdentityProfile {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub email: String,
+    #[serde(default)]
+    pub path_prefixes: Vec<PathBuf>,
+    #[serde(default)]
+    pub remote_patterns: Vec<String>,
+    #[serde(default)]
+    pub providers: Vec<Provider>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepoIdentityReport {
+    pub enforcement_enabled: bool,
+    pub state: IdentityState,
+    pub profile: Option<String>,
+    pub candidates: Vec<String>,
+    pub expected_name: Option<String>,
+    pub expected_email: Option<String>,
+    pub actual_name: Option<String>,
+    pub actual_email: Option<String>,
+    pub committer_name: Option<String>,
+    pub committer_email: Option<String>,
+    pub environment_overrides: Vec<String>,
+    pub message: String,
+}
+
+impl RepoIdentityReport {
+    pub fn is_blocking(&self) -> bool {
+        self.enforcement_enabled && self.state != IdentityState::Matched
+    }
+
+    pub fn state_label(&self) -> &'static str {
+        self.state.label()
+    }
+
+    pub fn short_state(&self) -> String {
+        match self.state {
+            IdentityState::Matched => self
+                .profile
+                .as_deref()
+                .map(|profile| format!("identity:{profile}"))
+                .unwrap_or_else(|| IdentityState::Matched.label().to_string()),
+            state => state.label().to_string(),
+        }
+    }
+
+    pub fn expected_display(&self) -> String {
+        display_identity(&self.expected_name, &self.expected_email)
+    }
+
+    pub fn actual_display(&self) -> String {
+        display_identity(&self.actual_name, &self.actual_email)
+    }
+
+    pub fn committer_display(&self) -> String {
+        display_identity(&self.committer_name, &self.committer_email)
+    }
+
+    fn unavailable(message: impl Into<String>) -> Self {
+        Self {
+            enforcement_enabled: false,
+            state: IdentityState::Unavailable,
+            profile: None,
+            candidates: Vec::new(),
+            expected_name: None,
+            expected_email: None,
+            actual_name: None,
+            actual_email: None,
+            committer_name: None,
+            committer_email: None,
+            environment_overrides: Vec::new(),
+            message: message.into(),
+        }
+    }
+}
+
+fn display_identity(name: &Option<String>, email: &Option<String>) -> String {
+    match (name.as_deref(), email.as_deref()) {
+        (Some(name), Some(email)) => format!("{name} <{email}>"),
+        (Some(name), None) => format!("{name} <email unset>"),
+        (None, Some(email)) => format!("name unset <{email}>"),
+        (None, None) => "unset".to_string(),
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkspaceManifest {
     pub workspace_root: PathBuf,
@@ -292,6 +420,7 @@ pub struct RepoStatus {
     pub incoming_wip_trusted: bool,
     pub outgoing_wip: Option<WipRef>,
     pub safety: RepoSafetyReport,
+    pub identity: RepoIdentityReport,
     pub last_error: Option<String>,
 }
 
@@ -329,6 +458,12 @@ impl RepoStatus {
         }
         if self.safety.has_fatal_findings() {
             parts.push(self.safety.short_state());
+        }
+        if !matches!(
+            self.identity.state,
+            IdentityState::Disabled | IdentityState::Matched
+        ) {
+            parts.push(self.identity.short_state());
         }
         parts.join(", ")
     }
@@ -402,6 +537,10 @@ pub struct LocalConfig {
     pub private_remote_patterns: Option<Vec<String>>,
     pub public_export_remotes: Option<Vec<String>>,
     pub ignore_profiles: Option<BTreeMap<String, Vec<String>>>,
+    pub require_identity: Option<bool>,
+    pub identity_profiles: Option<BTreeMap<String, GitIdentityProfile>>,
+    #[serde(skip)]
+    pub config_error: Option<String>,
 }
 
 pub fn project_dirs() -> Result<ProjectDirs> {
@@ -801,6 +940,7 @@ fn failed_repo_status(entry: &RepoEntry, error: String) -> RepoStatus {
         incoming_wip_trusted: true,
         outgoing_wip: None,
         safety: RepoSafetyReport::ok(RepoVisibility::Unknown, true),
+        identity: RepoIdentityReport::unavailable(error.clone()),
         last_error: Some(error),
     }
 }
@@ -810,6 +950,7 @@ pub fn repo_status_result(entry: &RepoEntry) -> Result<RepoStatus> {
     let branch = current_branch(&entry.path)?;
     let tracking_branch = tracking_branch(&entry.path).ok();
     let remotes = remotes(&entry.path)?;
+    let identity = identity_report_with_config(entry, &remotes, &config);
     let dirty_paths = sync_paths_with_config(entry, &config)?;
     let (ahead, behind) = if let Some(tracking_branch) = &tracking_branch {
         ahead_behind(&entry.path, tracking_branch).unwrap_or((None, None))
@@ -841,6 +982,7 @@ pub fn repo_status_result(entry: &RepoEntry) -> Result<RepoStatus> {
         incoming_wip_trusted,
         outgoing_wip,
         safety,
+        identity,
         last_error: None,
     })
 }
@@ -944,14 +1086,15 @@ fn sync_repo_inner_with_config(
     report: &mut SyncReport,
     config: &LocalConfig,
 ) -> Result<()> {
+    let remotes = remotes(&entry.path)?;
+    let identity = enforce_identity(entry, &remotes, config)?;
     let branch = current_branch(&entry.path)?.unwrap_or_else(|| "HEAD".to_string());
     let before_dirty = sync_paths_with_config(entry, config)?;
-    let remotes = remotes(&entry.path)?;
 
     let wip_remote = wip_remote_name(&remotes);
 
     if entry.wip_sync && wip_remote.is_some() && !before_dirty.is_empty() {
-        let sha = create_wip_snapshot(&entry.path, &branch, &before_dirty)?;
+        let sha = create_wip_snapshot(&entry.path, &branch, &before_dirty, identity.as_ref())?;
         push_wip_snapshot(&entry.path, wip_remote.as_deref().unwrap(), &branch, &sha)?;
         report.action(format!("pushed WIP snapshot {}", short_sha(&sha)));
     } else if !before_dirty.is_empty() {
@@ -986,7 +1129,8 @@ fn sync_repo_inner_with_config(
             report.action(format!("applied incoming WIP from {}", wip.device));
             let combined_dirty = sync_paths_with_config(entry, config)?;
             if !combined_dirty.is_empty() {
-                let sha = create_wip_snapshot(&entry.path, &branch, &combined_dirty)?;
+                let sha =
+                    create_wip_snapshot(&entry.path, &branch, &combined_dirty, identity.as_ref())?;
                 push_wip_snapshot(&entry.path, wip_remote.as_deref().unwrap(), &branch, &sha)?;
                 report.action(format!("pushed combined WIP {}", short_sha(&sha)));
             }
@@ -1008,6 +1152,20 @@ pub fn clone_repo(request: &CloneRequest) -> Result<PathBuf> {
         .workspace_root
         .join(provider.folder())
         .join(sanitize_component(&name));
+
+    let config = load_local_config();
+    let mut candidate_remotes = BTreeMap::new();
+    candidate_remotes.insert("origin".to_string(), request.url.clone());
+    let candidate = RepoEntry {
+        id: repo_id(&destination, provider),
+        path: destination.clone(),
+        provider,
+        enabled: true,
+        primary_remote: Some(request.url.clone()),
+        wip_sync: true,
+        review_required: false,
+    };
+    let _identity = enforce_identity(&candidate, &candidate_remotes, &config)?;
 
     if destination.exists() {
         bail!("destination already exists: {}", destination.display());
@@ -1034,6 +1192,8 @@ pub fn commit(repo: &Path, message: &str, paths: &[String]) -> Result<()> {
     }
     let entry = entry_for_repo(repo)?;
     let config = load_local_config();
+    let remotes = remotes(repo)?;
+    let identity = enforce_identity(&entry, &remotes, &config)?;
     if paths.is_empty() {
         git(repo, ["add", "-A"])?;
     } else {
@@ -1044,13 +1204,29 @@ pub fn commit(repo: &Path, message: &str, paths: &[String]) -> Result<()> {
         let _ = git(repo, ["reset", "-q"]);
         bail!("{}", format_audit_block(&entry, &report));
     }
-    git(repo, ["commit", "-m", message])?;
+    if let Some(identity) = identity {
+        git_env(
+            repo,
+            ["commit", "-m", message],
+            [
+                ("GIT_AUTHOR_NAME", identity.name.as_str()),
+                ("GIT_AUTHOR_EMAIL", identity.email.as_str()),
+                ("GIT_COMMITTER_NAME", identity.name.as_str()),
+                ("GIT_COMMITTER_EMAIL", identity.email.as_str()),
+            ],
+        )?;
+    } else {
+        git(repo, ["commit", "-m", message])?;
+    }
     Ok(())
 }
 
 pub fn push(repo: &Path) -> Result<()> {
     let entry = entry_for_repo(repo)?;
-    let report = audit_repo(&entry)?;
+    let config = load_local_config();
+    let remotes = remotes(repo)?;
+    let _identity = enforce_identity(&entry, &remotes, &config)?;
+    let report = audit_repo_with_config(&entry, &config)?;
     if report.has_fatal_findings() {
         bail!("{}", format_audit_block(&entry, &report));
     }
@@ -1193,7 +1369,33 @@ pub fn set_remote(repo: &Path, name: &str, url: &str) -> Result<()> {
     if name.trim().is_empty() || url.trim().is_empty() {
         bail!("remote name and URL are required");
     }
-    if remotes(repo)?.contains_key(name) {
+    let current_remotes = remotes(repo)?;
+    if name != SYNC_REMOTE {
+        let config = load_local_config();
+        let provider = if name == "origin" {
+            let from_url = Provider::from_url(url);
+            if from_url == Provider::Other {
+                Provider::from_path(repo)
+            } else {
+                from_url
+            }
+        } else {
+            Provider::from_path(repo)
+        };
+        let mut candidate_remotes = current_remotes.clone();
+        candidate_remotes.insert(name.to_string(), url.to_string());
+        let candidate = RepoEntry {
+            id: repo_id(repo, provider),
+            path: repo.to_path_buf(),
+            provider,
+            enabled: true,
+            primary_remote: candidate_remotes.get("origin").cloned(),
+            wip_sync: true,
+            review_required: false,
+        };
+        let _identity = enforce_identity(&candidate, &candidate_remotes, &config)?;
+    }
+    if current_remotes.contains_key(name) {
         git(repo, ["remote", "set-url", name, url])?;
     } else {
         git(repo, ["remote", "add", name, url])?;
@@ -1239,6 +1441,378 @@ pub fn remotes(repo: &Path) -> Result<BTreeMap<String, String>> {
             .or_insert_with(|| url.to_string());
     }
     Ok(remotes)
+}
+
+pub fn identity_report(entry: &RepoEntry) -> RepoIdentityReport {
+    let config = load_local_config();
+    let remotes = remotes(&entry.path).unwrap_or_default();
+    identity_report_with_config(entry, &remotes, &config)
+}
+
+#[derive(Debug, Clone, Default)]
+struct EffectiveGitIdentity {
+    author_name: Option<String>,
+    author_email: Option<String>,
+    committer_name: Option<String>,
+    committer_email: Option<String>,
+    environment_overrides: Vec<String>,
+}
+
+fn identity_report_with_config(
+    entry: &RepoEntry,
+    remotes: &BTreeMap<String, String>,
+    config: &LocalConfig,
+) -> RepoIdentityReport {
+    let enforcement_enabled = identity_enforcement_enabled(config);
+    let actual = effective_git_identity(&entry.path);
+    let profiles = config.identity_profiles.as_ref();
+    let has_profiles = profiles.is_some_and(|profiles| !profiles.is_empty());
+
+    if !has_profiles {
+        return RepoIdentityReport {
+            enforcement_enabled,
+            state: if enforcement_enabled {
+                IdentityState::Unconfigured
+            } else {
+                IdentityState::Disabled
+            },
+            profile: None,
+            candidates: Vec::new(),
+            expected_name: None,
+            expected_email: None,
+            actual_name: actual.author_name,
+            actual_email: actual.author_email,
+            committer_name: actual.committer_name,
+            committer_email: actual.committer_email,
+            environment_overrides: actual.environment_overrides,
+            message: if enforcement_enabled {
+                "identity enforcement is enabled but no identity profiles are configured"
+                    .to_string()
+            } else {
+                "identity enforcement is disabled; no identity profiles are configured".to_string()
+            },
+        };
+    }
+
+    let profiles = profiles.expect("identity profile presence checked above");
+    let mut invalid = profiles
+        .iter()
+        .filter_map(|(id, profile)| {
+            invalid_identity_profile_reason(id, profile).map(|reason| format!("{id}: {reason}"))
+        })
+        .collect::<Vec<_>>();
+    if let Some(error) = &config.config_error {
+        invalid.insert(0, error.clone());
+    }
+    if !invalid.is_empty() {
+        return RepoIdentityReport {
+            enforcement_enabled,
+            state: IdentityState::Invalid,
+            profile: None,
+            candidates: Vec::new(),
+            expected_name: None,
+            expected_email: None,
+            actual_name: actual.author_name,
+            actual_email: actual.author_email,
+            committer_name: actual.committer_name,
+            committer_email: actual.committer_email,
+            environment_overrides: actual.environment_overrides,
+            message: format!(
+                "invalid identity profile configuration: {}",
+                invalid.join("; ")
+            ),
+        };
+    }
+
+    let candidates = profiles
+        .iter()
+        .filter(|(_, profile)| {
+            identity_profile_matches(profile, &entry.path, entry.provider, remotes)
+        })
+        .map(|(id, _)| id.clone())
+        .collect::<Vec<_>>();
+
+    if candidates.len() != 1 {
+        let state = if candidates.is_empty() {
+            IdentityState::Unconfigured
+        } else {
+            IdentityState::Ambiguous
+        };
+        let message = if candidates.is_empty() {
+            "no identity profile matches this repository path, provider, and remotes".to_string()
+        } else {
+            format!(
+                "multiple identity profiles match this repository: {}",
+                candidates.join(", ")
+            )
+        };
+        return RepoIdentityReport {
+            enforcement_enabled,
+            state,
+            profile: None,
+            candidates,
+            expected_name: None,
+            expected_email: None,
+            actual_name: actual.author_name,
+            actual_email: actual.author_email,
+            committer_name: actual.committer_name,
+            committer_email: actual.committer_email,
+            environment_overrides: actual.environment_overrides,
+            message,
+        };
+    }
+
+    let profile_id = candidates[0].clone();
+    let profile = profiles
+        .get(&profile_id)
+        .expect("identity candidate must exist");
+    let expected_name = profile.name.trim().to_string();
+    let expected_email = profile.email.trim().to_string();
+    let mut differences = Vec::new();
+    if actual.author_name.as_deref() != Some(expected_name.as_str())
+        || actual.author_email.as_deref() != Some(expected_email.as_str())
+    {
+        differences.push(format!(
+            "author is {}",
+            display_identity(&actual.author_name, &actual.author_email)
+        ));
+    }
+    if actual.committer_name.as_deref() != Some(expected_name.as_str())
+        || actual.committer_email.as_deref() != Some(expected_email.as_str())
+    {
+        differences.push(format!(
+            "committer is {}",
+            display_identity(&actual.committer_name, &actual.committer_email)
+        ));
+    }
+    let state = if differences.is_empty() {
+        IdentityState::Matched
+    } else {
+        IdentityState::Mismatch
+    };
+    let message = if differences.is_empty() {
+        format!("Git author and committer match identity profile {profile_id}")
+    } else {
+        format!(
+            "Git identity does not match profile {profile_id} (expected {expected_name} <{expected_email}>; {})",
+            differences.join("; ")
+        )
+    };
+
+    RepoIdentityReport {
+        enforcement_enabled,
+        state,
+        profile: Some(profile_id),
+        candidates,
+        expected_name: Some(expected_name),
+        expected_email: Some(expected_email),
+        actual_name: actual.author_name,
+        actual_email: actual.author_email,
+        committer_name: actual.committer_name,
+        committer_email: actual.committer_email,
+        environment_overrides: actual.environment_overrides,
+        message,
+    }
+}
+
+fn identity_enforcement_enabled(config: &LocalConfig) -> bool {
+    config.require_identity.unwrap_or_else(|| {
+        config
+            .identity_profiles
+            .as_ref()
+            .is_some_and(|profiles| !profiles.is_empty())
+    })
+}
+
+fn invalid_identity_profile_reason(id: &str, profile: &GitIdentityProfile) -> Option<String> {
+    if id.trim().is_empty() {
+        return Some("profile id is empty".to_string());
+    }
+    if profile.name.trim().is_empty() {
+        return Some("name is empty".to_string());
+    }
+    if profile.email.trim().is_empty() {
+        return Some("email is empty".to_string());
+    }
+    if profile.path_prefixes.is_empty()
+        && profile.remote_patterns.is_empty()
+        && profile.providers.is_empty()
+    {
+        return Some(
+            "at least one path_prefixes, remote_patterns, or providers selector is required"
+                .to_string(),
+        );
+    }
+    if profile
+        .path_prefixes
+        .iter()
+        .map(|path| expand_home(path.clone()))
+        .any(|path| !path.is_absolute())
+    {
+        return Some("path_prefixes must be absolute paths or use ~/".to_string());
+    }
+    if profile
+        .remote_patterns
+        .iter()
+        .any(|pattern| pattern.trim().is_empty())
+    {
+        return Some("remote_patterns cannot contain empty values".to_string());
+    }
+    None
+}
+
+fn identity_profile_matches(
+    profile: &GitIdentityProfile,
+    repo: &Path,
+    provider: Provider,
+    remotes: &BTreeMap<String, String>,
+) -> bool {
+    let path_matches = profile.path_prefixes.is_empty()
+        || profile.path_prefixes.iter().any(|prefix| {
+            let prefix = expand_home(prefix.clone());
+            let canonical_repo = repo.canonicalize().unwrap_or_else(|_| repo.to_path_buf());
+            let canonical_prefix = prefix.canonicalize().unwrap_or(prefix);
+            canonical_repo.starts_with(canonical_prefix)
+        });
+    let remote_matches = profile.remote_patterns.is_empty()
+        || profile.remote_patterns.iter().any(|pattern| {
+            let primary = remotes
+                .get("origin")
+                .map(|url| ("origin", url))
+                .or_else(|| remotes.get(SYNC_REMOTE).map(|url| (SYNC_REMOTE, url)));
+            primary.is_some_and(|(name, url)| remote_selector_matches(pattern, name, url))
+        });
+    let provider_matches = profile.providers.is_empty() || profile.providers.contains(&provider);
+    path_matches && remote_matches && provider_matches
+}
+
+fn remote_selector_matches(pattern: &str, name: &str, url: &str) -> bool {
+    let pattern = pattern.trim().to_ascii_lowercase();
+    if pattern.is_empty() {
+        return false;
+    }
+    if name.to_ascii_lowercase() == pattern {
+        return true;
+    }
+    let pattern = normalize_remote_selector(&pattern);
+    let url = normalize_remote_selector(url);
+    url == pattern || url.starts_with(&(pattern + "/"))
+}
+
+fn normalize_remote_selector(value: &str) -> String {
+    let value = value.trim().to_ascii_lowercase();
+    let mut rest = value
+        .split_once("://")
+        .map(|(_, rest)| rest.to_string())
+        .unwrap_or(value);
+
+    if let Some(separator) = rest
+        .find(['/', ':'])
+        .and_then(|index| rest[..index].rfind('@').map(|_| index))
+    {
+        let authority = &rest[..separator];
+        let without_user = authority
+            .rsplit_once('@')
+            .map(|(_, without_user)| without_user)
+            .unwrap_or(authority);
+        rest = format!("{without_user}{}", &rest[separator..]);
+    } else if let Some((_, without_user)) = rest.rsplit_once('@') {
+        rest = without_user.to_string();
+    }
+
+    let normalized = if let Some((host, path)) = rest.split_once(':') {
+        format!("{host}/{path}")
+    } else if let Some((host, path)) = rest.split_once('/') {
+        format!("{host}/{path}")
+    } else {
+        rest.to_string()
+    };
+    let normalized = normalized.trim_matches('/');
+    normalized
+        .strip_suffix(".git")
+        .unwrap_or(normalized)
+        .to_string()
+}
+
+fn effective_git_identity(repo: &Path) -> EffectiveGitIdentity {
+    let configured_name = git_config_value(repo, "user.name");
+    let configured_email = git_config_value(repo, "user.email");
+    let author_name_override = env::var_os("GIT_AUTHOR_NAME");
+    let author_email_override = env::var_os("GIT_AUTHOR_EMAIL");
+    let committer_name_override = env::var_os("GIT_COMMITTER_NAME");
+    let committer_email_override = env::var_os("GIT_COMMITTER_EMAIL");
+
+    let mut environment_overrides = Vec::new();
+    for (name, value) in [
+        ("GIT_AUTHOR_NAME", &author_name_override),
+        ("GIT_AUTHOR_EMAIL", &author_email_override),
+        ("GIT_COMMITTER_NAME", &committer_name_override),
+        ("GIT_COMMITTER_EMAIL", &committer_email_override),
+    ] {
+        if value.is_some() {
+            environment_overrides.push(name.to_string());
+        }
+    }
+
+    EffectiveGitIdentity {
+        author_name: author_name_override
+            .map(|value| value.to_string_lossy().into_owned())
+            .or_else(|| configured_name.clone()),
+        author_email: author_email_override
+            .map(|value| value.to_string_lossy().into_owned())
+            .or_else(|| configured_email.clone()),
+        committer_name: committer_name_override
+            .map(|value| value.to_string_lossy().into_owned())
+            .or(configured_name),
+        committer_email: committer_email_override
+            .map(|value| value.to_string_lossy().into_owned())
+            .or(configured_email),
+        environment_overrides,
+    }
+}
+
+fn git_config_value(repo: &Path, key: &str) -> Option<String> {
+    let output = if repo.is_dir() {
+        git_command_output(git_command(repo, ["config", "--get", key])).ok()?
+    } else {
+        let mut command = Command::new("git");
+        command.args(["config", "--get", key]);
+        command.output().ok()?
+    };
+    if !output.status.success() {
+        return None;
+    }
+    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!value.is_empty()).then_some(value)
+}
+
+fn enforce_identity(
+    entry: &RepoEntry,
+    remotes: &BTreeMap<String, String>,
+    config: &LocalConfig,
+) -> Result<Option<GitIdentityProfile>> {
+    let report = identity_report_with_config(entry, remotes, config);
+    if report.is_blocking() {
+        bail!("identity check blocked {}: {}", entry.id, report.message);
+    }
+    if !report.enforcement_enabled || report.state != IdentityState::Matched {
+        return Ok(None);
+    }
+    let Some(profile_id) = report.profile else {
+        bail!("identity check matched without a profile for {}", entry.id);
+    };
+    let profile = config
+        .identity_profiles
+        .as_ref()
+        .and_then(|profiles| profiles.get(&profile_id))
+        .cloned()
+        .with_context(|| {
+            format!(
+                "identity profile disappeared while checking {entry_id}",
+                entry_id = entry.id
+            )
+        })?;
+    Ok(Some(profile))
 }
 
 pub fn dirty_paths(repo: &Path) -> Result<Vec<ChangedPath>> {
@@ -1310,6 +1884,15 @@ fn policy_report_with_config(entry: &RepoEntry, config: &LocalConfig) -> Result<
             severity: PolicySeverity::Blocker,
             path: finding.path,
             message: finding.reason,
+        });
+    }
+
+    let identity = identity_report_with_config(entry, &remotes, config);
+    if identity.is_blocking() {
+        findings.push(PolicyFinding {
+            severity: PolicySeverity::Blocker,
+            path: None,
+            message: format!("identity policy: {}", identity.message),
         });
     }
 
@@ -1937,7 +2520,12 @@ fn ahead_behind(repo: &Path, tracking_branch: &str) -> Result<(Option<u32>, Opti
     Ok((ahead, behind))
 }
 
-fn create_wip_snapshot(repo: &Path, branch: &str, dirty: &[ChangedPath]) -> Result<String> {
+fn create_wip_snapshot(
+    repo: &Path,
+    branch: &str,
+    dirty: &[ChangedPath],
+    identity: Option<&GitIdentityProfile>,
+) -> Result<String> {
     let temp_index = temp_index_path(repo)?;
     let mut cleanup = CleanupFile(temp_index.clone());
 
@@ -1972,9 +2560,24 @@ fn create_wip_snapshot(repo: &Path, branch: &str, dirty: &[ChangedPath]) -> Resu
     let device = repo_device_id(repo);
     let message = format!("GitDCY WIP from {device} on {branch}");
     let parent = git_output(repo, ["rev-parse", "HEAD"])?.trim().to_string();
-    let sha = git_output(repo, ["commit-tree", &tree, "-p", &parent, "-m", &message])?
+    let sha = if let Some(identity) = identity {
+        git_output_env(
+            repo,
+            ["commit-tree", &tree, "-p", &parent, "-m", &message],
+            [
+                ("GIT_AUTHOR_NAME", identity.name.as_str()),
+                ("GIT_AUTHOR_EMAIL", identity.email.as_str()),
+                ("GIT_COMMITTER_NAME", identity.name.as_str()),
+                ("GIT_COMMITTER_EMAIL", identity.email.as_str()),
+            ],
+        )?
         .trim()
-        .to_string();
+        .to_string()
+    } else {
+        git_output(repo, ["commit-tree", &tree, "-p", &parent, "-m", &message])?
+            .trim()
+            .to_string()
+    };
     let local_ref = local_wip_ref(&device, branch);
     git(repo, ["update-ref", &local_ref, &sha])?;
 
@@ -2508,10 +3111,39 @@ fn save_local_config(config: &LocalConfig) -> Result<PathBuf> {
 }
 
 fn read_local_config_file(path: &Path) -> LocalConfig {
-    let Ok(text) = fs::read_to_string(path) else {
-        return LocalConfig::default();
+    let text = match fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return LocalConfig::default();
+        }
+        Err(error) => {
+            return invalid_local_config(format!(
+                "could not read GitDCY config {}: {error}",
+                path.display()
+            ));
+        }
     };
-    serde_norway::from_str::<LocalConfig>(&text).unwrap_or_default()
+    match serde_norway::from_str::<LocalConfig>(&text) {
+        Ok(config) => config,
+        Err(error) => invalid_local_config(format!(
+            "could not parse GitDCY config {}: {error}",
+            path.display()
+        )),
+    }
+}
+
+fn invalid_local_config(error: String) -> LocalConfig {
+    let mut identity_profiles = BTreeMap::new();
+    identity_profiles.insert(
+        "__invalid_local_config__".to_string(),
+        GitIdentityProfile::default(),
+    );
+    LocalConfig {
+        require_identity: Some(true),
+        identity_profiles: Some(identity_profiles),
+        config_error: Some(error),
+        ..LocalConfig::default()
+    }
 }
 
 fn merge_local_config(mut base: LocalConfig, next: LocalConfig) -> LocalConfig {
@@ -2554,6 +3186,17 @@ fn merge_local_config(mut base: LocalConfig, next: LocalConfig) -> LocalConfig {
     }
     if let Some(next_profiles) = next.ignore_profiles {
         merge_list_map(&mut base.ignore_profiles, next_profiles);
+    }
+    if next.require_identity.is_some() {
+        base.require_identity = next.require_identity;
+    }
+    if let Some(next_identities) = next.identity_profiles {
+        base.identity_profiles
+            .get_or_insert_with(BTreeMap::new)
+            .extend(next_identities);
+    }
+    if next.config_error.is_some() {
+        base.config_error = next.config_error;
     }
     base
 }
@@ -2700,12 +3343,244 @@ mod tests {
             Provider::Github
         );
         assert_eq!(
+            Provider::from_url("git@github-special:owner/example.git"),
+            Provider::Github
+        );
+        assert_eq!(
             Provider::from_url("git@gitlab.com:a/b.git"),
             Provider::Gitlab
         );
         assert_eq!(
             Provider::from_url("ssh://git@forgejo.example/a/b.git"),
             Provider::Forgejo
+        );
+    }
+
+    #[test]
+    fn remote_identity_selector_matches_host_alias_not_an_unrelated_path_fragment() {
+        let profile = GitIdentityProfile {
+            name: "Profile".to_string(),
+            email: "profile@example.invalid".to_string(),
+            remote_patterns: vec!["github-special".to_string()],
+            providers: vec![Provider::Github],
+            ..GitIdentityProfile::default()
+        };
+        let wrong_remote = BTreeMap::from([(
+            "origin".to_string(),
+            "ssh://git@other-host/team/github-special.git".to_string(),
+        )]);
+        assert!(!identity_profile_matches(
+            &profile,
+            Path::new("/tmp/repo"),
+            Provider::Github,
+            &wrong_remote
+        ));
+
+        let right_remote = BTreeMap::from([(
+            "origin".to_string(),
+            "git@github-special:owner/repo.git".to_string(),
+        )]);
+        assert!(identity_profile_matches(
+            &profile,
+            Path::new("/tmp/repo"),
+            Provider::Github,
+            &right_remote
+        ));
+    }
+
+    #[test]
+    fn identity_profiles_deserialize_from_local_yaml() {
+        let config: LocalConfig = serde_norway::from_str(
+            r#"require_identity: true
+identity_profiles:
+  forgejo-selfhosted:
+    name: Forgejo User
+    email: forgejo@example.invalid
+    providers:
+      - forgejo
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(config.require_identity, Some(true));
+        let profile = config
+            .identity_profiles
+            .as_ref()
+            .and_then(|profiles| profiles.get("forgejo-selfhosted"))
+            .unwrap();
+        assert_eq!(profile.name, "Forgejo User");
+        assert_eq!(profile.email, "forgejo@example.invalid");
+        assert_eq!(profile.providers, vec![Provider::Forgejo]);
+    }
+
+    #[test]
+    fn incomplete_identity_profile_is_invalid_and_fail_closed() {
+        let config: LocalConfig = serde_norway::from_str(
+            r#"require_identity: true
+identity_profiles:
+  incomplete:
+    providers:
+      - forgejo
+"#,
+        )
+        .unwrap();
+        let entry = entry("forgejo/incomplete", Path::new("/tmp/incomplete"));
+        let report = identity_report_with_config(&entry, &BTreeMap::new(), &config);
+
+        assert_eq!(report.state, IdentityState::Invalid, "{report:?}");
+        assert!(report.is_blocking(), "{report:?}");
+    }
+
+    #[test]
+    fn identity_profile_requires_all_declared_selectors_and_matches_git_identity() {
+        let fixture = GitFixture::new("identity_match");
+        let repo = fixture.clone_repo("repo");
+        let mut identity_profiles = BTreeMap::new();
+        identity_profiles.insert(
+            "fixture-github".to_string(),
+            GitIdentityProfile {
+                name: "GitDCY Test".to_string(),
+                email: "gitdcy@example.invalid".to_string(),
+                path_prefixes: vec![fixture.root.clone()],
+                remote_patterns: vec!["origin".to_string()],
+                providers: vec![Provider::Github],
+            },
+        );
+        let config = LocalConfig {
+            require_identity: Some(true),
+            identity_profiles: Some(identity_profiles),
+            ..LocalConfig::default()
+        };
+        let entry = entry("github/fixture", &repo);
+        let report = identity_report_with_config(&entry, &remotes(&repo).unwrap(), &config);
+
+        assert_eq!(report.state, IdentityState::Matched, "{report:?}");
+        assert!(!report.is_blocking(), "{report:?}");
+        assert_eq!(report.profile.as_deref(), Some("fixture-github"));
+        assert_eq!(
+            report.expected_display(),
+            "GitDCY Test <gitdcy@example.invalid>"
+        );
+        assert_eq!(
+            report.actual_display(),
+            "GitDCY Test <gitdcy@example.invalid>"
+        );
+    }
+
+    #[test]
+    fn identity_profile_mismatch_blocks_sync_before_worktree_actions() {
+        let fixture = GitFixture::new("identity_mismatch");
+        let repo = fixture.clone_repo("repo");
+        let mut identity_profiles = BTreeMap::new();
+        identity_profiles.insert(
+            "wrong-profile".to_string(),
+            GitIdentityProfile {
+                name: "Wrong User".to_string(),
+                email: "wrong@example.invalid".to_string(),
+                path_prefixes: vec![fixture.root.clone()],
+                remote_patterns: vec!["origin".to_string()],
+                providers: vec![Provider::Github],
+            },
+        );
+        let config = LocalConfig {
+            require_identity: Some(true),
+            identity_profiles: Some(identity_profiles),
+            ..LocalConfig::default()
+        };
+        let report = sync_repo_with_config(&entry("github/fixture", &repo), &config);
+
+        assert!(
+            report
+                .blocked
+                .as_deref()
+                .is_some_and(|reason| reason.contains("identity check blocked")),
+            "{report:?}"
+        );
+        assert!(
+            report.actions.is_empty(),
+            "identity failure must happen before sync actions: {report:?}"
+        );
+    }
+
+    #[test]
+    fn identity_profile_ambiguity_is_blocking() {
+        let fixture = GitFixture::new("identity_ambiguous");
+        let repo = fixture.clone_repo("repo");
+        let profile = GitIdentityProfile {
+            name: "GitDCY Test".to_string(),
+            email: "gitdcy@example.invalid".to_string(),
+            path_prefixes: vec![fixture.root.clone()],
+            remote_patterns: vec!["origin".to_string()],
+            providers: vec![Provider::Github],
+        };
+        let mut identity_profiles = BTreeMap::new();
+        identity_profiles.insert("first".to_string(), profile.clone());
+        identity_profiles.insert("second".to_string(), profile);
+        let config = LocalConfig {
+            require_identity: Some(true),
+            identity_profiles: Some(identity_profiles),
+            ..LocalConfig::default()
+        };
+        let report = identity_report_with_config(
+            &entry("github/fixture", &repo),
+            &remotes(&repo).unwrap(),
+            &config,
+        );
+
+        assert_eq!(report.state, IdentityState::Ambiguous, "{report:?}");
+        assert!(report.is_blocking(), "{report:?}");
+        assert_eq!(report.candidates, vec!["first", "second"]);
+    }
+
+    #[test]
+    fn forgejo_provider_profile_covers_repos_without_an_origin_remote() {
+        let fixture = GitFixture::new("identity_forgejo");
+        let repo = fixture.clone_repo("repo");
+        run(&repo, ["remote", "remove", "origin"]);
+        let mut identity_profiles = BTreeMap::new();
+        identity_profiles.insert(
+            "forgejo-selfhosted".to_string(),
+            GitIdentityProfile {
+                name: "GitDCY Test".to_string(),
+                email: "gitdcy@example.invalid".to_string(),
+                providers: vec![Provider::Forgejo],
+                ..GitIdentityProfile::default()
+            },
+        );
+        let config = LocalConfig {
+            require_identity: Some(true),
+            identity_profiles: Some(identity_profiles),
+            ..LocalConfig::default()
+        };
+        let mut forgejo_entry = entry("forgejo/fixture", &repo);
+        forgejo_entry.provider = Provider::Forgejo;
+        let report = identity_report_with_config(&forgejo_entry, &BTreeMap::new(), &config);
+
+        assert_eq!(report.state, IdentityState::Matched, "{report:?}");
+        assert!(!report.is_blocking(), "{report:?}");
+    }
+
+    #[test]
+    fn wip_snapshot_uses_the_selected_identity_explicitly() {
+        let fixture = GitFixture::new("identity_wip");
+        let repo = fixture.clone_repo("repo");
+        fs::write(repo.join("README.md"), "profile-owned WIP\n").unwrap();
+        let dirty = dirty_paths(&repo).unwrap();
+        let profile = GitIdentityProfile {
+            name: "WIP Profile".to_string(),
+            email: "wip-profile@example.invalid".to_string(),
+            ..GitIdentityProfile::default()
+        };
+
+        let sha = create_wip_snapshot(&repo, "main", &dirty, Some(&profile)).unwrap();
+        let identity = git_output(&repo, ["show", "-s", "--format=%an <%ae> %cn <%ce>", &sha])
+            .unwrap()
+            .trim()
+            .to_string();
+
+        assert_eq!(
+            identity,
+            "WIP Profile <wip-profile@example.invalid> WIP Profile <wip-profile@example.invalid>"
         );
     }
 

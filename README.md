@@ -58,6 +58,7 @@ cargo run -p gitdcy-cli -- status --format json
 cargo run -p gitdcy-cli -- dashboard
 cargo run -p gitdcy-cli -- audit --all
 cargo run -p gitdcy-cli -- policy status --all
+cargo run -p gitdcy-cli -- identity status --all
 cargo run -p gitdcy-cli -- sync --all
 ```
 
@@ -194,6 +195,60 @@ GitDCY reads machine-local settings from the app config directory as
 
 The GUI writes per-device settings, including the `.env` checkbox, to the app
 config directory. Those settings are not committed to this repo.
+
+## Separate Git Identities
+
+GitDCY can enforce a different Git commit identity for different repository
+families. Identity profiles are machine-local and are matched using any
+combination of path prefixes, provider, and remote URL/SSH-alias selectors.
+Every selector group supplied on a profile must match; if zero or multiple
+profiles match, GitDCY treats the repository as unsafe. A configured identity
+profile also checks both the author and committer identity, including Git
+identity environment overrides.
+
+Add profiles to `local.yaml` or the ignored `.gitdcy.local.yaml` file. Identity
+enforcement turns on automatically when profiles exist; set
+`require_identity: true` explicitly to fail closed even before profiles are
+written. GitDCY does not rewrite repository `.git/config`, global Git config,
+SSH keys, credentials, or any repository content.
+
+For a three-account layout, keep the private path prefixes and account values
+in the ignored local config. A generic shape is:
+
+```yaml
+scan_roots:
+  - ~/Documents/private-workspace
+  - ~/Documents/forgejo
+  - ~/Documents/github
+require_identity: true
+identity_profiles:
+  github-main:
+    name: YOUR_MAIN_GITHUB_NAME
+    email: YOUR_MAIN_GITHUB_NOREPLY_EMAIL
+    path_prefixes:
+      - ~/Documents/private-workspace/project-a
+    remote_patterns:
+      - github.com/your-account/project-a
+  github-special:
+    name: YOUR_SPECIAL_GITHUB_NAME
+    email: YOUR_SPECIAL_GITHUB_EMAIL
+    path_prefixes:
+      - ~/Documents/private-workspace/special-projects
+    remote_patterns:
+      - your-github-ssh-alias
+  forgejo-selfhosted:
+    name: YOUR_FORGEJO_NAME
+    email: YOUR_FORGEJO_EMAIL
+    providers:
+      - forgejo
+```
+
+`identity status --all` is read-only and shows the selected profile, expected
+identity, actual author/committer identity, and any blocking reason. Once
+profiles are configured, GitDCY checks them before `commit`, `push`, `sync`,
+`clone`, and origin/public-remote changes. WIP commits use the selected profile
+explicitly, so a correct ambient global identity cannot accidentally leak into
+another profile.
 
 ## Configure Private WIP Sync
 
