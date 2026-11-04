@@ -580,11 +580,23 @@ fn the_hook_refuses_when_gitdcy_is_gone() {
     let bin = s.root.join("bin");
     fs::create_dir_all(&bin).unwrap();
     fs::copy(GITDCY, bin.join("gitdcy")).unwrap();
-    let out = s
-        .command(bin.join("gitdcy").to_str().unwrap(), &work)
-        .args(["rules", "install"])
-        .output()
-        .unwrap();
+    // A thread of another test that forks while the copy is still open for
+    // writing keeps it busy for a moment ("Text file busy"): start it again.
+    let out = (0..50)
+        .find_map(|_| {
+            match s
+                .command(bin.join("gitdcy").to_str().unwrap(), &work)
+                .args(["rules", "install"])
+                .output()
+            {
+                Err(error) if error.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                    None
+                }
+                other => Some(other.unwrap()),
+            }
+        })
+        .expect("the copied gitdcy stayed busy");
     assert!(out.status.success(), "{}", text(&out));
     fs::rename(bin.join("gitdcy"), bin.join("gitdcy.moved")).unwrap();
     let out = s
