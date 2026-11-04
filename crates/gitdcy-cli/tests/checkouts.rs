@@ -48,7 +48,7 @@ impl Sandbox {
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env_remove("GIT_DIR")
             .env_remove("GIT_WORK_TREE")
-            .env_remove("LINUXMICE_READ_ONLY_STATUS");
+            .env_remove("GITDCY_READ_ONLY_STATUS");
         command
     }
 

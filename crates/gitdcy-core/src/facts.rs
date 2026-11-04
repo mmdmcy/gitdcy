@@ -214,8 +214,6 @@ fn is_notable_ignored_path(path: &str) -> bool {
         "build",
         "dist",
         "node_modules",
-        // A partial copy LinuxMice is still writing.
-        ".linuxmice-partial",
         "target",
         "vendor",
         "coverage",
@@ -231,7 +229,12 @@ fn is_notable_ignored_path(path: &str) -> bool {
         "Pods",
         "DerivedData",
     ];
-    if path.split('/').any(|part| REBUILDABLE.contains(&part)) {
+    // A folder ending in `-partial` is a copy still being written (rsync's
+    // `--partial-dir`), never state of its own.
+    if path
+        .split('/')
+        .any(|part| REBUILDABLE.contains(&part) || part.ends_with("-partial"))
+    {
         return false;
     }
     let name = path.rsplit('/').next().unwrap_or(path);
@@ -648,6 +651,8 @@ mod tests {
             "macos/Flutter/ephemeral",
             ".DS_Store",
             "dist",
+            ".rsync-partial/.env",
+            "app/.copy-partial/data.db",
         ] {
             assert!(!is_notable_ignored_path(path), "{path} should be skipped");
         }
