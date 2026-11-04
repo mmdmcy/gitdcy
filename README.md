@@ -62,6 +62,7 @@ cargo run -p gitdcy-cli -- identity status --all
 cargo run -p gitdcy-cli -- check --all
 cargo run -p gitdcy-cli -- rules
 cargo run -p gitdcy-cli -- checkouts
+cargo run -p gitdcy-cli -- relate main origin/main
 cargo run -p gitdcy-cli -- sync --all
 ```
 
@@ -493,6 +494,70 @@ gitdcy checkouts --no-fetch --facts --format json -- /abs/path/to/repo
 A tool that keeps checkouts level on several devices runs this on each one
 (`--facts` when it moves or retires work), and GUITboard reads it for its
 picture when GitDCY is installed.
+
+## Relate
+
+`gitdcy relate A B` says how two commits or refs of one repository relate:
+`equal`, `ahead` (A holds all of B and more), `behind`, `diverged` (each has
+commits the other lacks, from a common ancestor), `unrelated` (no common
+history) or `missing` (no repository at that path, or A or B is not in it),
+with `ahead` and `behind` counting the commits only in A and only in B.
+`--list N` also lists up to N of those commits on each side, newest first.
+Nothing is fetched, and git runs without the repository's hooks or fsmonitor.
+
+```bash
+gitdcy relate main origin/main
+gitdcy relate --repo ~/code/app 1a2b3c HEAD --format json
+printf '%s\t%s\t%s\n' ~/code/app 1a2b3c HEAD | gitdcy relate --stdin --format json
+```
+
+`--stdin` reads `PATH<TAB>A<TAB>B` lines and answers each in order, so a tool
+comparing many checkouts asks once. The JSON is the `gitdcy.response.v1`
+envelope (operation `relate`); `data.relations` holds, per question: `repo`,
+`a`, `b`, `a_commit` and `b_commit` (full ids, null when not there),
+`relation`, `ahead`, `behind`, `detail` and, with `--list`, `only_a` and
+`only_b` (`id`, `subject`). A `missing` answer is also a warning. The exit
+code is 0 unless the command itself failed.
+
+## Carry
+
+`gitdcy carry` moves work between two checkouts of one repository (on two
+devices, say) without overwriting or deleting anything on either side.
+
+- `gitdcy carry send DEST --from NAME --operation ID` pushes into the checkout
+  at `DEST` (as `git push` names it: `host:path`, a URL or a path) under
+  `refs/carry/NAME/ID/`: each branch at a `--tip` (`heads/BRANCH`, or
+  `tips/COMMIT` where no branch points at it), each `--stash` (`stash/N`,
+  newest first), `--head COMMIT` (`head`) and, with `--worktree`, the working
+  tree, untracked files included, as a commit on top of HEAD (`wip`). That
+  commit is made in a throwaway index and object folder, so the sending
+  checkout is not written to. `GIT_SSH_COMMAND` in the environment reaches
+  the other side; neither side's hooks run.
+- `gitdcy carry place --from NAME --operation ID`, in the receiving
+  checkout, makes a branch only where its name is free (else
+  `carry/NAME/BRANCH`, else the ref is kept), stores each stash entry once
+  (`git stash store`), and applies the working tree only when the checkout is
+  clean and at the commit the work was made on (else the branch
+  `carry/NAME/wip-ID`, else the ref is kept). With `--fast-forward BRANCH` it
+  instead moves that branch, when it is checked out, to the carried `head`,
+  only when the branch is behind and only as a fast-forward.
+- `gitdcy carry aside --as REF` stashes the uncommitted work, untracked files
+  included, keeps it under `REF` and takes it off the stash list, once the
+  work continues elsewhere: `git stash apply REF` brings it back. A clean
+  checkout has nothing to set aside and is left alone.
+
+```bash
+gitdcy carry send desk:code/app --from laptop --operation 1 --tip feature --stash 'stash@{0}' --worktree
+gitdcy carry place --repo ~/code/app --from laptop --operation 1
+gitdcy carry aside --as refs/carry-aside/desk-1 --message 'continues on desk'
+```
+
+Each line `place` prints is one thing done or left (`branch NAME`,
+`stash COMMIT`, `applied the working tree`, `kept REF`); with
+`--format json` the envelope (operations `carry.send`, `carry.place`,
+`carry.aside`) holds them as `data.placed` (`action`, `name`, `text`). The
+refs under `refs/carry/` stay as the record of what arrived. A carry that
+cannot be done exits 1 and says why.
 
 ## Configure Private WIP Sync
 
