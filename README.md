@@ -416,7 +416,9 @@ push for them; in JSON they are `data.reminders`, each with `kind` (`dirty`,
 `behind`, `unpushed`, `branch`, `pull-request`, `pull-requests-unknown`),
 `text` and `fix`. A scan's `hygiene` per checkout also holds the counts
 (`changed`, `behind`, `unpushed`, `unpushed_before_today`), `fetched_at`, the
-`branches` and the `pull_requests`.
+`branches` and the `pull_requests`; `data.pull_requests` says once for the
+whole scan whether GitHub could be asked (`known`, `unknown` with
+`pull_requests_detail`, or `not-asked`), and the text says it once too.
 
 ## Checkouts
 

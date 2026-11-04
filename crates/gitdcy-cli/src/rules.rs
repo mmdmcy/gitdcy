@@ -344,6 +344,15 @@ fn scan_warnings(report: &ScanReport) -> Vec<String> {
     warnings
 }
 
+/// A checkout's reminders, without the unknown pull requests the scan's
+/// header names once.
+fn dishes(c: &CheckoutScan) -> impl Iterator<Item = &Reminder> {
+    c.hygiene
+        .iter()
+        .flat_map(|h| &h.reminders)
+        .filter(|r| r.kind != "pull-requests-unknown")
+}
+
 /// Whether a checkout has anything to say.
 fn notable(c: &CheckoutScan) -> bool {
     c.state != "ok"
@@ -351,7 +360,7 @@ fn notable(c: &CheckoutScan) -> bool {
         || !c.conflicts.is_empty()
         || !c.forbidden.is_empty()
         || !c.pushed_findings.is_empty()
-        || c.hygiene.as_ref().is_some_and(|h| !h.reminders.is_empty())
+        || dishes(c).next().is_some()
 }
 
 /// The checkouts with something to say, then a count of the rest.
@@ -369,6 +378,13 @@ fn print_scan(report: &ScanReport) {
             "; no reminders (the rules file has no [hygiene])"
         }
     );
+    // Said once here, not for every checkout on GitHub.
+    if report.pull_requests == "unknown" {
+        println!(
+            "  open pull requests are unknown: {} (gh auth login, then scan again)",
+            report.pull_requests_detail
+        );
+    }
     let mut quiet = 0;
     for c in &report.checkouts {
         if !notable(c) {
@@ -413,7 +429,7 @@ fn print_scan(report: &ScanReport) {
                 finding.shown
             );
         }
-        for reminder in c.hygiene.iter().flat_map(|h| &h.reminders) {
+        for reminder in dishes(c) {
             println!("    - {}: {}", reminder.text, reminder.fix);
         }
     }

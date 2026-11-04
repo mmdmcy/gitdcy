@@ -787,7 +787,9 @@ fn without_gh_pull_requests_are_unknown_and_a_skipped_repository_gets_no_reminde
         rule(&first, "\"anywhere\"", "")
     ));
     let out = s.gitdcy(&work, &["rules", "scan", "--format", "json", "."]);
-    let dishes = &json(&out)["data"]["checkouts"][0]["hygiene"];
+    let value = json(&out);
+    assert_eq!(value["data"]["pull_requests"], "unknown", "{value}");
+    let dishes = &value["data"]["checkouts"][0]["hygiene"];
     assert_eq!(dishes["pull_requests"]["state"], "unknown", "{dishes}");
     let unknown = dishes["reminders"]
         .as_array()
@@ -799,6 +801,9 @@ fn without_gh_pull_requests_are_unknown_and_a_skipped_repository_gets_no_reminde
         unknown["text"].as_str().unwrap().contains("gh auth login"),
         "{unknown}"
     );
+    // In words it is said once for the scan, not per checkout.
+    let said = text(&s.gitdcy(&work, &["rules", "scan", "."]));
+    assert_eq!(said.matches("open pull requests").count(), 1, "{said}");
 
     s.rules(&format!(
         "{}\n[hygiene]\nskip = [\"github.com/Example-Org/\"]\n",
