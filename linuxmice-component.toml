@@ -2,7 +2,7 @@ schema_version = "linuxmice.component.v1"
 id = "katteke.gitdcy"
 display_name = "GitDCY"
 version = "0.1.0"
-summary = "Standalone Git lifecycle tool exposed to LinuxMice through a read-only status contract."
+summary = "Standalone Git lifecycle tool exposed to LinuxMice through a read-only status contract and repository rules."
 component_type = "integration"
 standalone = true
 platforms = ["linux"]
@@ -12,13 +12,17 @@ documentation = "https://docs.katteke.com/products/gitdcy/"
 package = "gitdcy"
 
 [capabilities]
-provides = ["git.status.read"]
+provides = ["git.status.read", "git.rules.read", "git.rules.check"]
 requires = []
 optional = ["hub.catalog"]
 
 [interfaces]
 mode = "command"
-commands = ["/usr/bin/gitdcy status --format json"]
+commands = [
+  "/usr/bin/gitdcy status --format json",
+  "/usr/bin/gitdcy rules --format json",
+  "/usr/bin/gitdcy rules check --format json",
+]
 endpoints = []
 
 [authentication]

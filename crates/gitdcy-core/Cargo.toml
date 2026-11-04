@@ -11,4 +11,5 @@ libc.workspace = true
 serde.workspace = true
 serde_norway.workspace = true
 thiserror.workspace = true
+toml.workspace = true
 walkdir.workspace = true
