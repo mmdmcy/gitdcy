@@ -5,14 +5,14 @@ version = "0.1.0"
 summary = "Standalone Git lifecycle tool exposed to LinuxMice through a read-only status contract, repository rules and checkouts."
 component_type = "integration"
 standalone = true
-platforms = ["linux"]
+platforms = ["linux", "macos", "windows"]
 documentation = "https://docs.katteke.com/products/gitdcy/"
 
 [installation]
 package = "gitdcy"
 
 [capabilities]
-provides = ["git.status.read", "git.rules.read", "git.rules.check", "git.checkouts.read", "git.checkouts.update"]
+provides = ["git.status.read", "git.rules.read", "git.rules.check", "git.checkouts.read", "git.checkouts.update", "git.checkouts.facts"]
 requires = []
 optional = ["hub.catalog"]
 
@@ -23,6 +23,7 @@ commands = [
   "/usr/bin/gitdcy rules --format json",
   "/usr/bin/gitdcy rules check --format json",
   "/usr/bin/gitdcy checkouts --format json",
+  "/usr/bin/gitdcy checkouts --no-fetch --facts --format json",
   "/usr/bin/gitdcy checkouts update --format json",
 ]
 endpoints = []

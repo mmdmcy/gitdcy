@@ -415,9 +415,44 @@ its two-letter `git status --porcelain` code; names only, never contents),
 fetch is also a warning, and makes the outcome `partial`. The exit code is 0
 unless the command itself failed.
 
+Any path can be named, so reading a checkout's state never runs its hooks or
+its fsmonitor (both can be set by the repository's own config), takes no
+optional locks and never prompts; only the fetch (skipped with `--no-fetch`)
+and `update`'s fast-forward run git as you configured it.
+
+`--facts` adds, per checkout that is not missing, what a tool moving or
+retiring it needs so that no work is lost. It is slower, since it hashes local
+changes, so views that refresh often leave it off. `facts` holds:
+
+- `head` (full commit id), `branch` (`git symbolic-ref --short HEAD`),
+  `upstream`, `ahead`, `behind`, and `origin` (its URL without user or
+  password, the rest as configured);
+- `changed` and `untracked`, counting each untracked file on its own
+  (`--untracked-files=all`), or `status_error` when `git status` failed;
+- `stashes` (commit ids), `unpushed_commits` and `unpushed_tips` (commits on
+  local branches that no remote-tracking branch holds, and the branch tips
+  among them);
+- `ignored_state`: ignored files that usually cannot be rebuilt (`.env`, local
+  databases, keys, `*.private.*`), by name only, never their contents;
+- `fingerprints`: `sha256:HEX PATH` (or `link:HEX`, `dir`) for every file that
+  differs from HEAD, deletions left out; null past 4096 files or 1 GiB;
+- `tree`: the id `git add -A && git write-tree` would give, computed in a
+  throwaway index and object folder so the repository is never written to;
+  identical working trees give identical ids on every device;
+- `carry_trees`: tree ids of commits under `refs/carry/`.
+
+A git read inside `--facts` that answers more than 1 MiB or takes longer than
+8 seconds counts as failed, and that fact falls back (for example no
+fingerprints).
+
+```bash
+gitdcy checkouts --no-fetch --facts --format json -- /abs/path/to/repo
+```
+
 LinuxMice's `lmice checkouts` runs this on each device for the checkouts its
-fleet file lists, and GUITboard reads it for its picture when GitDCY is
-installed.
+fleet file lists, its `lmice workspace` (sync, leave, back, retire) reads every
+repository it finds through `--facts`, and GUITboard reads it for its picture
+when GitDCY is installed.
 
 ## Configure Private WIP Sync
 

@@ -6,12 +6,18 @@
 //!
 //! A path is used as given; a leading `~/` is the user's home (also on
 //! Windows, where the shell does not expand it), and the report shows the
-//! path the way it was given, so a caller can match its own list.
+//! path the way it was given, so a caller can match its own list. Any
+//! checkout can be named, so reading its state runs git with hooks and
+//! fsmonitor off; only the fetch (skipped with `--no-fetch`) and `update`'s
+//! fast-forward run git as the user configured it.
 
+use super::facts::{self, Facts};
+use super::reading_git_command;
 use super::rules::normalize_url;
-use super::{command_error, current_branch, expand_home, git_bytes, git_command, git_output};
-use anyhow::{bail, Result};
+use super::{command_error, expand_home, git_command, git_command_output, git_output};
+use anyhow::{bail, Context, Result};
 use serde::Serialize;
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -27,6 +33,9 @@ pub struct Options {
     pub fetch: bool,
     /// Fast-forward a checkout that is behind and has no local changes or commits.
     pub update: bool,
+    /// Also read what a tool moving the checkout needs ([`Facts`]); slower,
+    /// since it hashes local changes.
+    pub facts: bool,
 }
 
 /// A file with local changes and git's two-letter status for it, as in
@@ -66,6 +75,9 @@ pub struct Checkout {
     /// Why the fetch failed; the rest is then as of the last fetch.
     pub fetch_error: String,
     pub detail: String,
+    /// With `--facts`, for every checkout that is not missing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub facts: Option<Facts>,
 }
 
 /// Every path, in the order given, read with up to eight at a time.
@@ -87,13 +99,21 @@ pub fn checkouts(paths: &[String], options: Options) -> Vec<Checkout> {
     report
 }
 
-/// One checkout.
+/// One checkout, with its facts last so they show any fast-forward.
 pub fn checkout(given: &str, options: Options) -> Checkout {
+    let dir = expand_home(PathBuf::from(given));
+    let mut found = state_of(given, &dir, options);
+    if options.facts && found.state != "missing" {
+        found.facts = Some(facts::read(&dir));
+    }
+    found
+}
+
+fn state_of(given: &str, dir: &Path, options: Options) -> Checkout {
     let mut found = Checkout {
         path: given.to_string(),
         ..Checkout::default()
     };
-    let dir = expand_home(PathBuf::from(given));
     if !dir.join(".git").exists() {
         found.state = "missing".into();
         found.detail = if dir.is_dir() {
@@ -103,17 +123,17 @@ pub fn checkout(given: &str, options: Options) -> Checkout {
         };
         return found;
     }
-    if let Err(error) = read(&dir, &mut found, options.fetch) {
+    if let Err(error) = read(dir, &mut found, options.fetch) {
         found.state = "error".into();
         found.detail = first_line(&format!("{error:#}"));
         return found;
     }
     if options.update && found.state == "behind" && found.changed == 0 {
         let behind = found.behind;
-        match git_output(&dir, ["merge", "--ff-only", "--quiet", "@{u}"]) {
+        match git_output(dir, ["merge", "--ff-only", "--quiet", "@{u}"]) {
             Ok(_) => {
                 let fetch_error = std::mem::take(&mut found.fetch_error);
-                let reread = read(&dir, &mut found, false);
+                let reread = read(dir, &mut found, false);
                 found.fetch_error = fetch_error;
                 found.updated = true;
                 if let Err(error) = reread {
@@ -146,8 +166,10 @@ pub fn checkout(given: &str, options: Options) -> Checkout {
 /// Reads branch, upstream, changes and commits into `found`.
 fn read(dir: &Path, found: &mut Checkout, fetch: bool) -> Result<()> {
     (found.behind, found.ahead) = (0, 0);
-    found.branch = current_branch(dir)?.unwrap_or_default();
-    found.tracking_branch = git_output(
+    found.branch = read_text(dir, ["branch", "--show-current"])?
+        .trim()
+        .to_string();
+    found.tracking_branch = read_text(
         dir,
         ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
     )
@@ -159,7 +181,7 @@ fn read(dir: &Path, found: &mut Checkout, fetch: bool) -> Result<()> {
         }
     }
     found.remote = remote_of(dir, &found.branch);
-    found.files = parse_status(&git_bytes(
+    found.files = parse_status(&read_git(
         dir,
         ["status", "--porcelain=v1", "-z", "--untracked-files=normal"],
     )?);
@@ -175,7 +197,7 @@ fn read(dir: &Path, found: &mut Checkout, fetch: bool) -> Result<()> {
         };
         return Ok(());
     }
-    let counts = git_output(dir, ["rev-list", "--left-right", "--count", "@{u}...HEAD"])?;
+    let counts = read_text(dir, ["rev-list", "--left-right", "--count", "@{u}...HEAD"])?;
     let mut numbers = counts.split_whitespace().map(|n| n.parse().unwrap_or(0));
     found.behind = numbers.next().unwrap_or(0);
     found.ahead = numbers.next().unwrap_or(0);
@@ -249,12 +271,12 @@ fn fetch_upstream(dir: &Path) -> Result<()> {
 /// The remote the branch follows, else `origin`, as `host/path`.
 fn remote_of(dir: &Path, branch: &str) -> String {
     let configured = (!branch.is_empty())
-        .then(|| git_output(dir, ["config", "--get", &format!("branch.{branch}.remote")]).ok())
+        .then(|| read_text(dir, ["config", "--get", &format!("branch.{branch}.remote")]).ok())
         .flatten()
         .map(|name| name.trim().to_string())
         .filter(|name| !name.is_empty() && name != ".");
     let name = configured.unwrap_or_else(|| "origin".to_string());
-    git_output(dir, ["remote", "get-url", &name])
+    read_text(dir, ["remote", "get-url", &name])
         .map(|url| normalize_url(url.trim()))
         .unwrap_or_default()
 }
@@ -262,12 +284,33 @@ fn remote_of(dir: &Path, branch: &str) -> String {
 /// `(unix seconds, "hash date subject")` of a commit; empty before the first one.
 fn last_commit(dir: &Path, rev: &str) -> (i64, String) {
     let text =
-        git_output(dir, ["log", "-1", "--format=%ct %h %cs %s", rev, "--"]).unwrap_or_default();
+        read_text(dir, ["log", "-1", "--format=%ct %h %cs %s", rev, "--"]).unwrap_or_default();
     let line = text.trim_end_matches(['\r', '\n']);
     match line.split_once(' ') {
         Some((time, rest)) => (time.parse().unwrap_or(0), rest.to_string()),
         None => (0, String::new()),
     }
+}
+
+/// What `git ARGS` printed, read with hooks and fsmonitor off.
+fn read_git<I, S>(dir: &Path, args: I) -> Result<Vec<u8>>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    let output = git_command_output(reading_git_command(dir, args)).context("run git")?;
+    if !output.status.success() {
+        bail!("{}", command_error("git", &output));
+    }
+    Ok(output.stdout)
+}
+
+fn read_text<I, S>(dir: &Path, args: I) -> Result<String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    Ok(String::from_utf8_lossy(&read_git(dir, args)?).into_owned())
 }
 
 /// `git status --porcelain=v1 -z`: `XY path`, and after a rename or copy the
@@ -362,5 +405,38 @@ mod tests {
         assert_eq!(found.state, "missing");
         assert_eq!(found.detail, "no folder at that path");
         assert_eq!(found.path, "/nonexistent/gitdcy-checkouts-test");
+        let with_facts = Options {
+            facts: true,
+            ..Options::default()
+        };
+        assert!(checkout("/nonexistent/gitdcy-checkouts-test", with_facts)
+            .facts
+            .is_none());
+    }
+
+    #[test]
+    fn facts_come_only_when_asked_even_when_git_fails() {
+        let dir = std::env::temp_dir().join(format!(
+            "gitdcy-checkout-facts-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(dir.join(".git")).unwrap();
+        let path = dir.display().to_string();
+        let plain = checkout(&path, Options::default());
+        assert_eq!(
+            (plain.state.as_str(), plain.facts.is_none()),
+            ("error", true)
+        );
+        let asked = checkout(
+            &path,
+            Options {
+                facts: true,
+                ..Options::default()
+            },
+        );
+        assert_eq!(asked.state, "error");
+        assert!(asked.facts.unwrap().status_error.is_some());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
