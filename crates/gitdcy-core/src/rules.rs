@@ -318,7 +318,16 @@ fn host_of(url: &str) -> Option<String> {
 /// `prefix` matches the URL itself or what lies under it (`github.com/org`
 /// matches `github.com/org/repo`, not `github.com/org-other/repo`).
 fn url_has_prefix(url: &str, prefix: &str) -> bool {
-    let (url, prefix) = (normalize_url(url), normalize_url(prefix));
+    // A prefix is written without a scheme (`github.com/Org/`), which on its
+    // own reads as a local path and would keep its capitals: read it as the
+    // remote it names, unless it is one (`/`, `.`, `~`).
+    let prefix = prefix.trim();
+    let prefix = if is_local(prefix) && !prefix.starts_with(['/', '.', '~']) {
+        normalize_url(&format!("https://{prefix}"))
+    } else {
+        normalize_url(prefix)
+    };
+    let url = normalize_url(url);
     !prefix.is_empty()
         && (url == prefix || (url.starts_with(&prefix) && url[prefix.len()..].starts_with('/')))
 }
@@ -1352,6 +1361,23 @@ mod tests {
         assert!(is_local(r"C:\repos\x.git"));
         assert!(is_local("./a:b"));
         assert!(!is_local("git@host:x"));
+    }
+
+    #[test]
+    fn a_remote_prefix_with_capitals_matches_as_github_does() {
+        let push = Push::Remotes(vec!["github.com/Example-Org/".into()]);
+        for url in [
+            "git@github.com:example-org/repo.git",
+            "https://github.com/Example-Org/repo",
+        ] {
+            assert!(remote_allowed(&push, url, &[], no_alias), "{url}");
+        }
+        assert!(!remote_allowed(
+            &push,
+            "https://github.com/example-org-other/repo",
+            &[],
+            no_alias
+        ));
     }
 
     #[test]
