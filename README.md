@@ -66,51 +66,44 @@ cargo run -p gitdcy-cli -- sync --all
 ```
 
 `status --format json` is a read-only integration surface. It emits the
-versioned `linuxmice.response.v1` envelope and deliberately omits remote URLs,
+versioned `gitdcy.response.v1` envelope and deliberately omits remote URLs,
 WIP object identifiers, and file contents. The default `status` output remains
-the compact human-readable table.
+the compact human-readable table. A health check that must not start a
+workspace scan can run `gitdcy --help`. `GITDCY_CORRELATION_ID` sets the
+envelope's `correlation_id`, so a caller can match an answer to its request.
 
-`linuxmice-component.toml` declares this optional read-only contract to a
-LinuxMice catalog. GitDCY remains independently usable and does not require a
-hub, shared identity service, or shared database.
-
-LinuxMice consumes this surface through `lmice workspace status --provider
-gitdcy`. The adapter validates the envelope and retains aggregate counts only;
-repository IDs, absolute paths, branches, provider warnings, and raw errors stay
-local to GitDCY. The component health probe uses `gitdcy --help` so catalog
-health does not trigger a potentially long workspace scan.
-
-On Linux, that integration marks the invocation as read-only. GitDCY then
-bounds each internal Git metadata command to two seconds and 256 KiB per output
-stream through a process-group/cancellation-aware runner with parent-death
+A caller that polls status unattended (a dashboard, or a tool asking many
+machines) sets `GITDCY_READ_ONLY_STATUS=1`. On Linux, GitDCY then bounds each
+internal Git metadata command to two seconds and 256 KiB per output stream
+through a process-group/cancellation-aware runner with parent-death
 signaling, and uses at most eight status workers across at most 128
-repositories. This marker is not set for standalone or mutating GitDCY
-workflows. Read-only workers run in batches with a 15-second wall-clock budget;
-late repositories become structured partial-status errors rather than blocking
-the full inventory. If a batch exceeds that budget, later batches are not
-started, so timed-out workers cannot accumulate across the scan.
-The marked path also avoids `gh`/`glab` visibility lookups and hostname command
-fallback, disables Git lazy fetching, and keeps LinuxMice aggregate status local
-and network-free. LinuxMice also restricts allowed Git protocols to `file`, so
-older Git versions that ignore `GIT_NO_LAZY_FETCH` still cannot lazily contact
-SSH, HTTPS, or Git remotes.
+repositories. Standalone and mutating GitDCY workflows never use this mode.
+Read-only workers run in batches with a 15-second wall-clock budget; late
+repositories become structured partial-status errors rather than blocking the
+full inventory. If a batch exceeds that budget, later batches are not started,
+so timed-out workers cannot accumulate across the scan.
+The read-only mode also avoids `gh`/`glab` visibility lookups and hostname
+command fallback and disables Git lazy fetching, so status stays local and
+network-free. A caller can also restrict allowed Git protocols to `file`
+(`GIT_ALLOW_PROTOCOL=file`), so older Git versions that ignore
+`GIT_NO_LAZY_FETCH` still cannot lazily contact SSH, HTTPS, or Git remotes.
 Repository discovery skips directory symlinks and generated trees and enforces
 directory, repository, and cooperative time limits on responsive local
-filesystems. A LinuxMice-marked invocation without a saved manifest additionally
+filesystems. A read-only invocation without a saved manifest additionally
 uses one-level fallback discovery under
 `~/Documents/{github,gitlab,forgejo}` and does not implicitly scan the legacy
 `~/Code` candidate; deeper or additional roots require an explicit GitDCY
 manifest. Provider-local scan-root overrides are not consumed by this
-no-manifest LinuxMice fallback. Standalone discovery keeps its prior deep-scan
+no-manifest read-only fallback. Standalone discovery keeps its prior deep-scan
 behavior within the common safety limits.
 
-LinuxMice does not schedule GitDCY sync, commit, push, policy, trust, clone, or
-remote mutations. Those remain explicit GitDCY workflows until their locking,
-multi-generation WIP refs, remote privacy, device provenance, and structured
-blocked/failure contracts are hardened for unattended use. LinuxMice mutation
-eligibility also requires safety snapshots to exclude ignored/private-file
-payloads; `.env`, `.gitpriv/`, and similar data must use a separate encrypted
-private-file contract rather than Git WIP refs.
+Sync, commit, push, policy, trust, clone and remote mutations stay explicit
+GitDCY workflows, not meant to be scheduled by another tool, until their
+locking, multi-generation WIP refs, remote privacy, device provenance, and
+structured blocked/failure contracts are hardened for unattended use.
+Unattended mutation also requires safety snapshots to exclude
+ignored/private-file payloads; `.env`, `.gitpriv/`, and similar data must use a
+separate encrypted private-file contract rather than Git WIP refs.
 
 To put the CLI on `PATH` from this checkout, install the CLI crate rather than
 the virtual workspace root:
@@ -348,7 +341,7 @@ overrides both.
 
 ```bash
 gitdcy rules                       # which rule applies here, and why
-gitdcy rules --format json         # the same, for scripts and LinuxMice
+gitdcy rules --format json         # the same, for scripts
 gitdcy rules install               # pre-push hook and a copy of the rule into .git/
 gitdcy rules check                 # what a push of this branch would be refused for
 ```
@@ -375,7 +368,7 @@ the repository's owner. Remote URLs are shown without user, password or port. A
 missing gitdcy refuses the push too, so a rule is never skipped in silence.
 
 Exit codes: 0 when the push may go, 1 when it is refused or the command failed.
-With `--format json` the result is the `linuxmice.response.v1` envelope
+With `--format json` the result is the `gitdcy.response.v1` envelope
 (operations `rules`, `rules.install`, `rules.check`), errors included; a refusal
 is `data.refused = true` with one line per reason in `data.reasons`.
 
@@ -405,7 +398,7 @@ does not expand it. A fetch never asks for a password (`GIT_TERMINAL_PROMPT=0`,
 named in the checkout's `fetch_error`, and the rest is then as of the last
 fetch.
 
-With `--format json` the result is the `linuxmice.response.v1` envelope
+With `--format json` the result is the `gitdcy.response.v1` envelope
 (operations `checkouts` and `checkouts.update`); `data.checkouts` holds, per
 path: `path`, `state`, `branch`, `tracking_branch`, `remote` (without user,
 password or port), `behind`, `ahead`, `changed`, `files` (each changed path with
@@ -449,10 +442,9 @@ fingerprints).
 gitdcy checkouts --no-fetch --facts --format json -- /abs/path/to/repo
 ```
 
-LinuxMice's `lmice checkouts` runs this on each device for the checkouts its
-fleet file lists, its `lmice workspace` (sync, leave, back, retire) reads every
-repository it finds through `--facts`, and GUITboard reads it for its picture
-when GitDCY is installed.
+A tool that keeps checkouts level on several devices runs this on each one
+(`--facts` when it moves or retires work), and GUITboard reads it for its
+picture when GitDCY is installed.
 
 ## Configure Private WIP Sync
 

@@ -74,7 +74,7 @@ impl StatusEnvelope {
             "partial"
         };
         Self {
-            schema_version: "linuxmice.response.v1",
+            schema_version: "gitdcy.response.v1",
             component: "katteke.gitdcy",
             operation: "status",
             outcome,
@@ -151,7 +151,7 @@ impl From<RepoStatus> for StatusRepo {
     }
 }
 
-/// The `linuxmice.response.v1` envelope around a command's result; an error
+/// The `gitdcy.response.v1` envelope around a command's result; an error
 /// is in the envelope too, so a script always reads JSON.
 #[derive(Serialize)]
 struct Envelope<'a, T: Serialize> {
@@ -176,7 +176,7 @@ pub(crate) fn print_json<T: Serialize>(
     warnings: Vec<String>,
 ) -> Result<()> {
     let envelope = Envelope {
-        schema_version: "linuxmice.response.v1",
+        schema_version: "gitdcy.response.v1",
         component: "katteke.gitdcy",
         operation,
         outcome: match (result, warnings.is_empty()) {
@@ -196,7 +196,7 @@ pub(crate) fn print_json<T: Serialize>(
 }
 
 pub(crate) fn correlation_id() -> String {
-    if let Ok(value) = std::env::var("LINUXMICE_CORRELATION_ID") {
+    if let Ok(value) = std::env::var("GITDCY_CORRELATION_ID") {
         if !value.trim().is_empty() {
             return value;
         }
@@ -215,7 +215,7 @@ mod tests {
     #[test]
     fn json_status_keeps_the_versioned_envelope_shape() {
         let envelope = StatusEnvelope {
-            schema_version: "linuxmice.response.v1",
+            schema_version: "gitdcy.response.v1",
             component: "katteke.gitdcy",
             operation: "status",
             outcome: "success",
@@ -248,7 +248,7 @@ mod tests {
         };
 
         let value = serde_json::to_value(envelope).expect("serialize status envelope");
-        assert_eq!(value["schema_version"], "linuxmice.response.v1");
+        assert_eq!(value["schema_version"], "gitdcy.response.v1");
         assert_eq!(value["component"], "katteke.gitdcy");
         assert_eq!(value["operation"], "status");
         assert_eq!(value["outcome"], "success");

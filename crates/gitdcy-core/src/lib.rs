@@ -28,11 +28,11 @@ const REPO_IGNORE_BLOCK_END: &str = "# END GITDCY REPO POLICY";
 const DISCOVERY_MAX_DIRECTORIES: usize = 100_000;
 const DISCOVERY_MAX_REPOSITORIES: usize = 512;
 const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(10);
-const LINUXMICE_GIT_OUTPUT_LIMIT: usize = 256 * 1024;
-const LINUXMICE_GIT_TIMEOUT: Duration = Duration::from_secs(2);
-const LINUXMICE_REPOSITORY_BATCH_TIMEOUT: Duration = Duration::from_secs(15);
-const LINUXMICE_STATUS_WORKERS: usize = 8;
-const LINUXMICE_STATUS_REPOSITORIES: usize = 128;
+const READ_ONLY_GIT_OUTPUT_LIMIT: usize = 256 * 1024;
+const READ_ONLY_GIT_TIMEOUT: Duration = Duration::from_secs(2);
+const READ_ONLY_REPOSITORY_BATCH_TIMEOUT: Duration = Duration::from_secs(15);
+const READ_ONLY_STATUS_WORKERS: usize = 8;
+const READ_ONLY_STATUS_REPOSITORIES: usize = 128;
 const CHECK_OUTPUT_LIMIT: usize = 256 * 1024;
 const CHECK_OUTPUT_DISPLAY_LIMIT: usize = 16 * 1024;
 const DEFAULT_CHECK_TIMEOUT_SECONDS: u64 = 15 * 60;
@@ -753,7 +753,7 @@ pub fn default_scan_roots() -> Vec<PathBuf> {
 }
 
 fn default_candidate_scan_roots() -> Vec<PathBuf> {
-    let mut roots = if linuxmice_read_only_status() {
+    let mut roots = if read_only_status() {
         Vec::new()
     } else {
         vec![default_workspace_root()]
@@ -880,7 +880,7 @@ pub fn load_or_discover_manifest() -> Result<WorkspaceManifest> {
         return Ok(manifest);
     }
 
-    let scan_roots = if linuxmice_read_only_status() {
+    let scan_roots = if read_only_status() {
         default_candidate_scan_roots()
     } else {
         default_scan_roots()
@@ -960,17 +960,17 @@ struct DiscoveryBudget {
 
 impl DiscoveryBudget {
     fn new() -> Self {
-        Self::for_mode(linuxmice_read_only_status())
+        Self::for_mode(read_only_status())
     }
 
-    fn for_mode(linuxmice_read_only: bool) -> Self {
+    fn for_mode(read_only: bool) -> Self {
         Self {
             directories: 0,
             repositories: 0,
             deadline: Instant::now() + DISCOVERY_TIMEOUT,
-            max_depth: if linuxmice_read_only { 1 } else { usize::MAX },
-            max_repositories: if linuxmice_read_only {
-                LINUXMICE_STATUS_REPOSITORIES
+            max_depth: if read_only { 1 } else { usize::MAX },
+            max_repositories: if read_only {
+                READ_ONLY_STATUS_REPOSITORIES
             } else {
                 DISCOVERY_MAX_REPOSITORIES
             },
@@ -1155,29 +1155,29 @@ pub fn repo_status_result(entry: &RepoEntry) -> Result<RepoStatus> {
 }
 
 pub fn status_all(manifest: &WorkspaceManifest) -> Vec<RepoStatus> {
-    status_all_for_mode(manifest, linuxmice_read_only_status())
+    status_all_for_mode(manifest, read_only_status())
 }
 
-fn status_all_for_mode(manifest: &WorkspaceManifest, linuxmice_read_only: bool) -> Vec<RepoStatus> {
+fn status_all_for_mode(manifest: &WorkspaceManifest, read_only: bool) -> Vec<RepoStatus> {
     let entries = manifest
         .repos
         .iter()
         .filter(|repo| repo.enabled)
         .cloned()
         .collect::<Vec<_>>();
-    if !linuxmice_read_only {
+    if !read_only {
         return entries.iter().map(repo_status).collect();
     }
 
     let mut statuses = std::iter::repeat_with(|| None)
         .take(entries.len())
         .collect::<Vec<Option<RepoStatus>>>();
-    let processable = entries.len().min(LINUXMICE_STATUS_REPOSITORIES);
+    let processable = entries.len().min(READ_ONLY_STATUS_REPOSITORIES);
     for (batch_number, batch) in entries[..processable]
-        .chunks(LINUXMICE_STATUS_WORKERS)
+        .chunks(READ_ONLY_STATUS_WORKERS)
         .enumerate()
     {
-        let first_index = batch_number * LINUXMICE_STATUS_WORKERS;
+        let first_index = batch_number * READ_ONLY_STATUS_WORKERS;
         let (sender, receiver) = std::sync::mpsc::channel();
         for (offset, entry) in batch.iter().cloned().enumerate() {
             let sender = sender.clone();
@@ -1187,7 +1187,7 @@ fn status_all_for_mode(manifest: &WorkspaceManifest, linuxmice_read_only: bool) 
         }
         drop(sender);
 
-        let deadline = Instant::now() + LINUXMICE_REPOSITORY_BATCH_TIMEOUT;
+        let deadline = Instant::now() + READ_ONLY_REPOSITORY_BATCH_TIMEOUT;
         let mut batch_timed_out = false;
         for _ in 0..batch.len() {
             let remaining = deadline.saturating_duration_since(Instant::now());
@@ -1208,7 +1208,7 @@ fn status_all_for_mode(manifest: &WorkspaceManifest, linuxmice_read_only: bool) 
             if statuses[index].is_none() {
                 statuses[index] = Some(failed_repo_status(
                     entry,
-                    "repository status exceeded its LinuxMice time safety limit".to_string(),
+                    "repository status exceeded its read-only time safety limit".to_string(),
                 ));
             }
         }
@@ -1216,7 +1216,7 @@ fn status_all_for_mode(manifest: &WorkspaceManifest, linuxmice_read_only: bool) 
             for (index, entry) in entries.iter().enumerate().skip(first_index + batch.len()) {
                 statuses[index] = Some(failed_repo_status(
                     entry,
-                    "repository status was not started after a prior batch exceeded its LinuxMice time safety limit"
+                    "repository status was not started after a prior batch exceeded its read-only time safety limit"
                         .to_string(),
                 ));
             }
@@ -1227,7 +1227,7 @@ fn status_all_for_mode(manifest: &WorkspaceManifest, linuxmice_read_only: bool) 
         if statuses[index].is_none() {
             statuses[index] = Some(failed_repo_status(
                 entry,
-                "repository status was not started because the LinuxMice repository safety limit was reached"
+                "repository status was not started because the read-only repository safety limit was reached"
                     .to_string(),
             ));
         }
@@ -2660,7 +2660,7 @@ fn visibility_override(entry: &RepoEntry, config: &LocalConfig) -> Option<Visibi
 }
 
 fn remote_url_visibility(url: &str) -> Option<RepoVisibility> {
-    if linuxmice_read_only_status() {
+    if read_only_status() {
         return None;
     }
     if let Some(slug) = repo_slug_for_host(url, "github.com") {
@@ -3469,13 +3469,13 @@ where
     command
 }
 
-fn linuxmice_read_only_status() -> bool {
-    std::env::var_os("LINUXMICE_READ_ONLY_STATUS").as_deref() == Some(OsStr::new("1"))
+fn read_only_status() -> bool {
+    std::env::var_os("GITDCY_READ_ONLY_STATUS").as_deref() == Some(OsStr::new("1"))
 }
 
 fn git_command_output(mut command: Command) -> Result<std::process::Output> {
-    if linuxmice_read_only_status() {
-        process::run_bounded_command(command, LINUXMICE_GIT_OUTPUT_LIMIT, LINUXMICE_GIT_TIMEOUT)
+    if read_only_status() {
+        process::run_bounded_command(command, READ_ONLY_GIT_OUTPUT_LIMIT, READ_ONLY_GIT_TIMEOUT)
     } else {
         command.output().context("run git command")
     }
@@ -3634,8 +3634,8 @@ pub fn device_id() -> String {
         .ok()
         .filter(|value| !value.trim().is_empty())
         .or_else(|| {
-            if linuxmice_read_only_status() {
-                Some("linuxmice-status".to_string())
+            if read_only_status() {
+                Some("read-only-status".to_string())
             } else {
                 Command::new("hostname")
                     .output()
@@ -3855,7 +3855,7 @@ mod tests {
     use std::process::Command;
 
     #[test]
-    fn linuxmice_read_only_status_workers_preserve_manifest_order() {
+    fn read_only_status_workers_preserve_manifest_order() {
         let manifest = WorkspaceManifest {
             workspace_root: PathBuf::from("/nonexistent"),
             repos: vec![
@@ -3871,7 +3871,7 @@ mod tests {
     }
 
     #[test]
-    fn linuxmice_fallback_discovery_is_one_level() {
+    fn read_only_fallback_discovery_is_one_level() {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()

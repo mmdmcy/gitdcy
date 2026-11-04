@@ -50,7 +50,7 @@ impl Sandbox {
             .env("PATH", &self.path)
             .env_remove("GIT_DIR")
             .env_remove("GIT_WORK_TREE")
-            .env_remove("LINUXMICE_READ_ONLY_STATUS");
+            .env_remove("GITDCY_READ_ONLY_STATUS");
         command
     }
 
@@ -553,7 +553,7 @@ fn errors_come_as_the_json_envelope() {
     let out = s.gitdcy(&not_a_repo, &["rules", "--format", "json"]);
     assert_eq!(out.status.code(), Some(1));
     let value = json(&out);
-    assert_eq!(value["schema_version"], "linuxmice.response.v1");
+    assert_eq!(value["schema_version"], "gitdcy.response.v1");
     assert_eq!(value["operation"], "rules");
     assert_eq!(value["outcome"], "error");
     assert!(value["error"]["message"]
