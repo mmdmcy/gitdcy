@@ -60,6 +60,7 @@ cargo run -p gitdcy-cli -- audit --all
 cargo run -p gitdcy-cli -- policy status --all
 cargo run -p gitdcy-cli -- identity status --all
 cargo run -p gitdcy-cli -- check --all
+cargo run -p gitdcy-cli -- rules
 cargo run -p gitdcy-cli -- sync --all
 ```
 
@@ -297,6 +298,85 @@ Each check has a bounded timeout and output capture. GitDCY sets `CI=true`,
 disables Git credential prompts, and keeps check output local. This catches
 known failures before a `gitdcy push`, but a direct `git push` bypasses GitDCY;
 an optional hook can be added later if that stronger boundary is wanted.
+
+## Repository Rules
+
+A repository's rules travel with the repository, not with a folder on one
+device. They are declared once per repository in the owner's rules file, a
+private TOML file, and found by the repository's identity: its first (root)
+commit, with remote URLs as a hint. Each rule says:
+
+- where the repository may be pushed: `selfhosted` (only remotes on hosts listed
+  under `selfhosted`, localhost, or a path on this device; an SSH alias that
+  resolves to a listed host counts), `nowhere` (no push at all), `anywhere`, or
+  a list of allowed remote URL prefixes (a prefix ends at a path boundary, so
+  `github.com/example-org` does not match `github.com/example-org-other`);
+- protected branches, which take no direct push and are reached only through a
+  pull request (deleting one on the remote is refused too);
+- a note with the owner's reason, shown with a refusal.
+
+```toml
+# Hosts that count as self-hosted (names or addresses).
+selfhosted = ["forge.example.com", "192.0.2.10"]
+
+# The personal-data check on every push: the owner's own words, and private
+# addresses that do belong in commits. Kept here, in the owner's private file,
+# never in a repository.
+personal = ["Jane Doe"]
+allow = []
+
+[[repo]]
+name = "example-app"
+first_commit = "0123456789abcdef0123456789abcdef01234567"
+remotes = ["ssh://git@forge.example.com:2222/team/example-app.git"]
+push = "selfhosted"     # or "nowhere", "anywhere", or ["github.com/example-org/"]
+protected = ["main"]
+note = "Customer data: it stays on our own forge."
+```
+
+`git rev-list --max-parents=0 HEAD` shows a repository's first commit. A rule
+without `first_commit` is found by its `remotes` alone; a shallow clone has a
+different first commit, so give such a rule its `remotes` too. The file is
+strict: an unknown key, an unknown `push` word, an empty list or two rules for
+one repository is an error, and an error refuses the push.
+
+GitDCY reads the rules file from `rules_file` in this device's own `local.yaml`
+(never from a `.gitdcy.local.yaml` in the current folder, which a repository
+could carry), else `rules.toml` in GitDCY's config folder. `--rules FILE`
+overrides both.
+
+```bash
+gitdcy rules                       # which rule applies here, and why
+gitdcy rules --format json         # the same, for scripts and LinuxMice
+gitdcy rules install               # pre-push hook and a copy of the rule into .git/
+gitdcy rules check                 # what a push of this branch would be refused for
+```
+
+`rules install` writes `.git/hooks/pre-push` and `.git/gitdcy-rules.toml`, a
+copy of this one repository's rule and the self-hosted host list, so the rule
+holds on a machine without the rules file. When the rules file has a rule for
+the repository it wins, and `gitdcy rules` says when the copy is out of date.
+The copy holds no personal words or allowed addresses; without the rules file
+the check reads for private mail addresses only. An existing pre-push hook is
+moved aside as `pre-push.bak-YYYY-MM-DD` and runs after the check, with the same
+arguments and input. When `core.hooksPath` sends git elsewhere and the hook
+there does not call `.git/hooks/pre-push`, nothing is written and the command
+says how to proceed. Running it twice changes nothing.
+
+`rules check` is what the hook runs (`gitdcy rules check --stdin REMOTE URL`,
+with the refs on standard input). It refuses a push to a remote or branch the
+rule does not allow, and reads the commits being pushed (added lines, message,
+author and committer) for private mail addresses (gmail, outlook, icloud, ...)
+that are not the repository's own git identity, and for the owner's personal
+words. A refusal names the commit and file and line, shows the value masked,
+gives the way forward, and offers no way around it: a refusal is a question for
+the repository's owner. Remote URLs are shown without user, password or port. A
+missing gitdcy refuses the push too, so a rule is never skipped in silence.
+
+Exit codes: 0 when the push may go, 1 when it is refused or the command failed.
+With `--format json` the result is the `linuxmice.response.v1` envelope
+(operations `rules`, `rules.install`, `rules.check`), errors included; a refusal
+is `data.refused = true` with one line per reason in `data.reasons`.
 
 ## Configure Private WIP Sync
 

@@ -10,7 +10,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+pub mod personal;
 mod process;
+pub mod rules;
 
 pub const APP_NAME: &str = "GitDCY";
 pub const SYNC_REMOTE: &str = "sync";
@@ -698,6 +700,10 @@ pub struct LocalConfig {
     pub identity_profiles: Option<BTreeMap<String, GitIdentityProfile>>,
     pub require_checks: Option<bool>,
     pub check_profiles: Option<BTreeMap<String, CheckProfile>>,
+    /// The repository rules file (`gitdcy rules`); read from this device's own
+    /// config only, never from a `.gitdcy.local.yaml` in the current folder.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rules_file: Option<PathBuf>,
     #[serde(skip)]
     pub config_error: Option<String>,
 }
@@ -3756,6 +3762,8 @@ fn merge_local_config(mut base: LocalConfig, next: LocalConfig) -> LocalConfig {
             .get_or_insert_with(BTreeMap::new)
             .extend(next_checks);
     }
+    // `rules_file` is not taken from `next`: a `.gitdcy.local.yaml` in the
+    // current folder could come with a repository and point elsewhere.
     if next.config_error.is_some() {
         base.config_error = next.config_error;
     }

@@ -25,6 +25,7 @@ use std::io;
 use std::path::PathBuf;
 use std::time::Duration;
 
+mod rules;
 mod status;
 
 use status::{status, OutputFormat};
@@ -107,6 +108,9 @@ enum Command {
         name: Option<String>,
     },
     SaveManifest,
+    /// Each repository's rules: where it may be pushed, branches that take only
+    /// a pull request, and the personal-data check before a push.
+    Rules(rules::RulesArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -227,6 +231,7 @@ fn main() -> Result<()> {
             println!("{}", destination.display());
             Ok(())
         }
+        Command::Rules(args) => rules::run(args),
         Command::SaveManifest => {
             let manifest = load_or_discover_manifest()?;
             save_manifest(&manifest)?;

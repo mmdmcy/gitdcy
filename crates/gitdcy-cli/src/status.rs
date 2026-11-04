@@ -151,7 +151,7 @@ impl From<RepoStatus> for StatusRepo {
     }
 }
 
-fn correlation_id() -> String {
+pub(crate) fn correlation_id() -> String {
     if let Ok(value) = std::env::var("LINUXMICE_CORRELATION_ID") {
         if !value.trim().is_empty() {
             return value;

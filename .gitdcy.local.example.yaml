@@ -6,6 +6,11 @@
 
 # workspace_root: ~/Code
 
+# The repository rules file read by `gitdcy rules` (default: rules.toml in the
+# app config directory). Only the app config directory's local.yaml sets it; a
+# .gitdcy.local.yaml in the current folder cannot.
+# rules_file: ~/path/to/private/rules.toml
+
 # Fail closed for GitDCY writes when identity profiles are present. GitDCY
 # never changes a repository's Git identity automatically; it only detects and
 # blocks a mismatch before commit, push, sync, or clone.
