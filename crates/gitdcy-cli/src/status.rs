@@ -151,6 +151,50 @@ impl From<RepoStatus> for StatusRepo {
     }
 }
 
+/// The `linuxmice.response.v1` envelope around a command's result; an error
+/// is in the envelope too, so a script always reads JSON.
+#[derive(Serialize)]
+struct Envelope<'a, T: Serialize> {
+    schema_version: &'static str,
+    component: &'static str,
+    operation: &'static str,
+    outcome: &'static str,
+    data: Option<&'a T>,
+    warnings: Vec<String>,
+    error: Option<ErrorBody>,
+    correlation_id: String,
+}
+
+#[derive(Serialize)]
+struct ErrorBody {
+    message: String,
+}
+
+pub(crate) fn print_json<T: Serialize>(
+    operation: &'static str,
+    result: &Result<T>,
+    warnings: Vec<String>,
+) -> Result<()> {
+    let envelope = Envelope {
+        schema_version: "linuxmice.response.v1",
+        component: "katteke.gitdcy",
+        operation,
+        outcome: match (result, warnings.is_empty()) {
+            (Err(_), _) => "error",
+            (Ok(_), true) => "success",
+            (Ok(_), false) => "partial",
+        },
+        data: result.as_ref().ok(),
+        warnings,
+        error: result.as_ref().err().map(|error| ErrorBody {
+            message: format!("{error:#}"),
+        }),
+        correlation_id: correlation_id(),
+    };
+    println!("{}", serde_json::to_string_pretty(&envelope)?);
+    Ok(())
+}
+
 pub(crate) fn correlation_id() -> String {
     if let Ok(value) = std::env::var("LINUXMICE_CORRELATION_ID") {
         if !value.trim().is_empty() {
