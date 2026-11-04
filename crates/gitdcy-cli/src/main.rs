@@ -25,6 +25,7 @@ use std::io;
 use std::path::PathBuf;
 use std::time::Duration;
 
+mod checkouts;
 mod rules;
 mod status;
 
@@ -111,6 +112,9 @@ enum Command {
     /// Each repository's rules: where it may be pushed, branches that take only
     /// a pull request, and the personal-data check before a push.
     Rules(rules::RulesArgs),
+    /// Checkouts against their upstream: up to date, behind, ahead, diverged,
+    /// local changes or missing; `update` fast-forwards only what is safe.
+    Checkouts(checkouts::CheckoutsArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -232,6 +236,7 @@ fn main() -> Result<()> {
             Ok(())
         }
         Command::Rules(args) => rules::run(args),
+        Command::Checkouts(args) => checkouts::run(args),
         Command::SaveManifest => {
             let manifest = load_or_discover_manifest()?;
             save_manifest(&manifest)?;

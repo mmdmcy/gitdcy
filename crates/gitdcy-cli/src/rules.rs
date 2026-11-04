@@ -1,7 +1,7 @@
 //! `gitdcy rules`: which rule applies to a repository, installing it into the
 //! checkout, and the check the pre-push hook runs.
 
-use crate::status::{correlation_id, OutputFormat};
+use crate::status::{print_json, OutputFormat};
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
 use gitdcy_core::rules::{
@@ -49,48 +49,6 @@ enum RulesCommand {
         /// The remote's URL (default: its push URL).
         url: Option<String>,
     },
-}
-
-#[derive(Serialize)]
-struct Envelope<T: Serialize> {
-    schema_version: &'static str,
-    component: &'static str,
-    operation: &'static str,
-    outcome: &'static str,
-    data: Option<T>,
-    warnings: Vec<String>,
-    error: Option<ErrorBody>,
-    correlation_id: String,
-}
-
-#[derive(Serialize)]
-struct ErrorBody {
-    message: String,
-}
-
-fn print_json<T: Serialize>(
-    operation: &'static str,
-    result: &Result<T>,
-    warnings: Vec<String>,
-) -> Result<()> {
-    let envelope = Envelope {
-        schema_version: "linuxmice.response.v1",
-        component: "katteke.gitdcy",
-        operation,
-        outcome: match (result, warnings.is_empty()) {
-            (Err(_), _) => "error",
-            (Ok(_), true) => "success",
-            (Ok(_), false) => "partial",
-        },
-        data: result.as_ref().ok(),
-        warnings,
-        error: result.as_ref().err().map(|error| ErrorBody {
-            message: format!("{error:#}"),
-        }),
-        correlation_id: correlation_id(),
-    };
-    println!("{}", serde_json::to_string_pretty(&envelope)?);
-    Ok(())
 }
 
 /// Runs `gitdcy rules ...`; the exit code is 1 when a push is refused or the

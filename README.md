@@ -61,6 +61,7 @@ cargo run -p gitdcy-cli -- policy status --all
 cargo run -p gitdcy-cli -- identity status --all
 cargo run -p gitdcy-cli -- check --all
 cargo run -p gitdcy-cli -- rules
+cargo run -p gitdcy-cli -- checkouts
 cargo run -p gitdcy-cli -- sync --all
 ```
 
@@ -377,6 +378,46 @@ Exit codes: 0 when the push may go, 1 when it is refused or the command failed.
 With `--format json` the result is the `linuxmice.response.v1` envelope
 (operations `rules`, `rules.install`, `rules.check`), errors included; a refusal
 is `data.refused = true` with one line per reason in `data.reasons`.
+
+## Checkouts
+
+`gitdcy checkouts [PATH...]` fetches each checkout's upstream and says where
+it stands: `current`, `behind` (with the newest upstream commit), `ahead`,
+`diverged`, `changed` (local changes only), `missing`, `no-upstream` or `error`.
+Without paths it reads every repository in the workspace. `--no-fetch` shows
+what the last fetch knew, for a view that refreshes often.
+
+`gitdcy checkouts update [PATH...]` fast-forwards a checkout only when it is
+behind with no local changes (untracked files included) and no local commits.
+It never makes a merge commit, rebases, forces, or touches local changes; a
+checkout that cannot be fast-forwarded is reported and left as it is.
+
+```bash
+gitdcy checkouts
+gitdcy checkouts ~/code/app ~/code/lib --format json
+gitdcy checkouts update ~/code/app
+```
+
+A path is used as given and reported the same way, so a caller can match its
+own list; a leading `~/` is the user's home, also on Windows, where the shell
+does not expand it. A fetch never asks for a password (`GIT_TERMINAL_PROMPT=0`,
+`GCM_INTERACTIVE=never`) and is stopped after 60 seconds; a failed fetch is
+named in the checkout's `fetch_error`, and the rest is then as of the last
+fetch.
+
+With `--format json` the result is the `linuxmice.response.v1` envelope
+(operations `checkouts` and `checkouts.update`); `data.checkouts` holds, per
+path: `path`, `state`, `branch`, `tracking_branch`, `remote` (without user,
+password or port), `behind`, `ahead`, `changed`, `files` (each changed path with
+its two-letter `git status --porcelain` code; names only, never contents),
+`head` and `upstream` (`hash date subject`), `head_time` (Unix seconds),
+`updated`, `fetch_error` and `detail`. A missing checkout, an error or a failed
+fetch is also a warning, and makes the outcome `partial`. The exit code is 0
+unless the command itself failed.
+
+LinuxMice's `lmice checkouts` runs this on each device for the checkouts its
+fleet file lists, and GUITboard reads it for its picture when GitDCY is
+installed.
 
 ## Configure Private WIP Sync
 
