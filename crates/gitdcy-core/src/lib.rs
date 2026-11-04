@@ -11,6 +11,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub mod checkouts;
+pub mod facts;
 pub mod personal;
 mod process;
 pub mod rules;
@@ -3444,6 +3445,27 @@ where
     for arg in args {
         command.arg(arg);
     }
+    command
+}
+
+/// `git -C repo ARGS` for reading a repository that may come from anywhere:
+/// hooks and fsmonitor off (a repository's own config can name a program
+/// for either), no optional locks (so `git status` does not rewrite the
+/// index) and never a password prompt.
+fn reading_git_command<I, S>(repo: &Path, args: I) -> Command
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    let mut command = git_command(repo, args);
+    command
+        .env("GIT_CONFIG_COUNT", "2")
+        .env("GIT_CONFIG_KEY_0", "core.fsmonitor")
+        .env("GIT_CONFIG_VALUE_0", "false")
+        .env("GIT_CONFIG_KEY_1", "core.hooksPath")
+        .env("GIT_CONFIG_VALUE_1", "/dev/null")
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .env("GIT_TERMINAL_PROMPT", "0");
     command
 }
 
