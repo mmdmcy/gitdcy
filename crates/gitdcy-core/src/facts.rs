@@ -340,7 +340,7 @@ fn working_tree_id(dir: &Path) -> Option<String> {
 }
 
 /// A new private folder under the temporary directory.
-fn scratch_folder() -> Option<PathBuf> {
+pub(crate) fn scratch_folder() -> Option<PathBuf> {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)

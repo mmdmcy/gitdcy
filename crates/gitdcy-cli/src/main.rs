@@ -25,7 +25,9 @@ use std::io;
 use std::path::PathBuf;
 use std::time::Duration;
 
+mod carry;
 mod checkouts;
+mod relate;
 mod rules;
 mod status;
 
@@ -115,6 +117,12 @@ enum Command {
     /// Checkouts against their upstream: up to date, behind, ahead, diverged,
     /// local changes or missing; `update` fast-forwards only what is safe.
     Checkouts(checkouts::CheckoutsArgs),
+    /// How two commits of a repository relate: equal, ahead, behind, diverged
+    /// or unrelated, with the commits only on each side counted.
+    Relate(relate::RelateArgs),
+    /// Moving work between two checkouts of a repository: send it, place it
+    /// (branches only where the name is free), set it aside.
+    Carry(carry::CarryArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -237,6 +245,8 @@ fn main() -> Result<()> {
         }
         Command::Rules(args) => rules::run(args),
         Command::Checkouts(args) => checkouts::run(args),
+        Command::Relate(args) => relate::run(args),
+        Command::Carry(args) => carry::run(args),
         Command::SaveManifest => {
             let manifest = load_or_discover_manifest()?;
             save_manifest(&manifest)?;

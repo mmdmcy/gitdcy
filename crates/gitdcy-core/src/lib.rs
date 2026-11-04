@@ -10,11 +10,13 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+pub mod carry;
 pub mod checkouts;
 pub mod facts;
 pub mod hygiene;
 pub mod personal;
 mod process;
+pub mod relate;
 pub mod rules;
 pub mod scan;
 
