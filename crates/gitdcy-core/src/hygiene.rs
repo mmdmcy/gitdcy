@@ -396,6 +396,11 @@ impl GitHub {
         }
     }
 
+    /// Why GitHub's pull requests could not be read, if they could not.
+    pub fn error(&self) -> Option<&str> {
+        self.found.as_ref().err().map(String::as_str)
+    }
+
     fn of(&self, repository: Option<&str>) -> PullRequests {
         let Some(repository) = repository else {
             return PullRequests {

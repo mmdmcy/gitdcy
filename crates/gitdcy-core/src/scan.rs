@@ -57,6 +57,13 @@ pub struct ScanReport {
     pub since: String,
     /// The `[hygiene]` settings; null when the rules file has none (no reminders).
     pub hygiene: Option<HygieneRules>,
+    /// GitHub's open pull requests for the scan as a whole: `known`,
+    /// `unknown` (gh could not be asked, `pull_requests_detail` says why, and
+    /// each checkout on GitHub has a `pull-requests-unknown` reminder) or
+    /// `not-asked` (no reminders, or no checkout on GitHub).
+    pub pull_requests: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub pull_requests_detail: String,
     /// How many personal words and allowed addresses are read for (the words are not shown).
     pub personal_words: usize,
     pub allowed_addresses: usize,
@@ -151,6 +158,11 @@ pub fn scan(
     } else {
         GitHub::ask_with(gh, &owners, &[], GH_TIMEOUT)
     };
+    let (pull_requests, pull_requests_detail) = match (owners.is_empty(), github.error()) {
+        (true, _) => ("not-asked", String::new()),
+        (false, Some(why)) => ("unknown", why.to_string()),
+        (false, None) => ("known", String::new()),
+    };
     let jobs: Vec<(String, Option<std::result::Result<RulesReport, String>>)> =
         paths.iter().cloned().zip(reports).collect();
     let checkouts = parallel(&jobs, |(given, report)| {
@@ -223,6 +235,8 @@ pub fn scan(
         rules_file_found: file.is_some(),
         since,
         hygiene: rules,
+        pull_requests: pull_requests.to_string(),
+        pull_requests_detail,
         personal_words: config.words.len(),
         allowed_addresses: config.allow.len(),
         checkouts,
