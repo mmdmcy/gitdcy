@@ -1,12 +1,14 @@
 //! `gitdcy rules`: which rule applies to a repository, installing it into the
-//! checkout, and the check the pre-push hook runs.
+//! checkout, the check the pre-push hook runs, and the scan of every checkout.
 
 use crate::status::{print_json, OutputFormat};
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
+use gitdcy_core::hygiene::Reminder;
 use gitdcy_core::rules::{
     self, parse_pushed_refs, CheckReport, CheckRequest, InstallReport, RuleSource, RulesReport,
 };
+use gitdcy_core::scan::{self, CheckoutScan, ScanReport};
 use serde::Serialize;
 use std::io::Read;
 use std::path::PathBuf;
@@ -17,9 +19,14 @@ use std::path::PathBuf;
   gitdcy rules --format json        the same, for scripts
   gitdcy rules install              hook and a copy of the rule into .git/
   gitdcy rules check                what a push of this branch would be refused for
+  gitdcy rules scan                 every checkout in the workspace against the rules
+  gitdcy rules scan ~/code/app --since 2026-10-24
 
 The rules file is the one given with --rules, else rules_file in GitDCY's
-local.yaml, else rules.toml in GitDCY's config folder.")]
+local.yaml, else rules.toml in GitDCY's config folder. With a [hygiene] table
+in it, scan and check also remind of work left lying around: a dirty tree or a
+pull not done, commits on no remote from before today, a branch not merged
+after branch_days (3), and open pull requests (GitHub's, through gh).")]
 pub(crate) struct RulesArgs {
     #[command(subcommand)]
     command: Option<RulesCommand>,
@@ -48,6 +55,17 @@ enum RulesCommand {
         remote: Option<String>,
         /// The remote's URL (default: its push URL).
         url: Option<String>,
+    },
+    /// Every checkout against the rules, read only: its rule, the remotes the
+    /// rule forbids, personal data in what already reached a remote, and the
+    /// reminders about work left lying around.
+    Scan {
+        /// Checkouts to read (default: --repo, else every repository in the workspace).
+        #[arg(value_name = "PATH")]
+        paths: Vec<String>,
+        /// Read what reached a remote since then (git's --since: 2026-10-24, "3 days ago"; default 7 days).
+        #[arg(long, value_name = "DATE")]
+        since: Option<String>,
     },
 }
 
@@ -95,6 +113,24 @@ pub(crate) fn run(args: RulesArgs) -> Result<()> {
                 |_| Vec::new(),
                 |r| print_check(r, hook),
                 |r| r.refused,
+            )?
+        }
+        Some(RulesCommand::Scan { paths, since }) => {
+            let paths = match (paths.is_empty(), &args.repo) {
+                (true, Some(repo)) => vec![repo.display().to_string()],
+                _ => paths,
+            };
+            let report = rules_path.and_then(|path| {
+                let paths = crate::checkouts::given_or_workspace(paths)?;
+                scan::scan(&path, &paths, since.as_deref(), gitdcy.as_deref(), "gh")
+            });
+            finish(
+                "rules.scan",
+                report,
+                json,
+                scan_warnings,
+                print_scan,
+                |_| false,
             )?
         }
     };
@@ -253,7 +289,8 @@ fn print_install(report: &InstallReport) {
     }
 }
 
-/// In the hook a clean push prints nothing; by hand, it says so.
+/// In the hook a clean push prints only its reminders; by hand, it says so.
+/// The reminders go to standard error and never refuse a push.
 fn print_check(report: &CheckReport, hook: bool) {
     if !report.refused {
         if !hook {
@@ -269,10 +306,120 @@ fn print_check(report: &CheckReport, hook: bool) {
                     .unwrap_or_default()
             );
         }
-        return;
+    } else {
+        let _ = write_check(&mut std::io::stderr(), report);
     }
-    let out = &mut std::io::stderr();
-    let _ = write_check(out, report);
+    if let Some(line) = reminder_line(&report.reminders) {
+        eprintln!(
+            "gitdcy rules: left lying around in {}: {line}",
+            report.repository
+        );
+    }
+}
+
+fn reminder_line(reminders: &[Reminder]) -> Option<String> {
+    (!reminders.is_empty()).then(|| {
+        reminders
+            .iter()
+            .map(|r| r.text.as_str())
+            .collect::<Vec<_>>()
+            .join("; ")
+    })
+}
+
+/// What could not be read as asked.
+fn scan_warnings(report: &ScanReport) -> Vec<String> {
+    let mut warnings: Vec<String> = report
+        .checkouts
+        .iter()
+        .filter(|c| c.state != "ok" || !c.detail.is_empty())
+        .map(|c| format!("{}: {}", c.path, c.detail))
+        .collect();
+    if !report.rules_file_found {
+        warnings.push(format!(
+            "no rules file at {}: no repository has a rule, and there are no reminders",
+            report.rules_file
+        ));
+    }
+    warnings
+}
+
+/// Whether a checkout has anything to say.
+fn notable(c: &CheckoutScan) -> bool {
+    c.state != "ok"
+        || c.rule.is_some()
+        || !c.conflicts.is_empty()
+        || !c.forbidden.is_empty()
+        || !c.pushed_findings.is_empty()
+        || c.hygiene.as_ref().is_some_and(|h| !h.reminders.is_empty())
+}
+
+/// The checkouts with something to say, then a count of the rest.
+fn print_scan(report: &ScanReport) {
+    let pushed: usize = report.checkouts.iter().map(|c| c.pushed_commits).sum();
+    println!(
+        "{} checkout(s) against {}; {} commit(s) that reached a remote since {} read for personal data{}",
+        report.checkouts.len(),
+        report.rules_file,
+        pushed,
+        report.since,
+        if report.hygiene.is_some() {
+            ""
+        } else {
+            "; no reminders (the rules file has no [hygiene])"
+        }
+    );
+    let mut quiet = 0;
+    for c in &report.checkouts {
+        if !notable(c) {
+            quiet += 1;
+            continue;
+        }
+        let rule = match (&c.rule, &c.push) {
+            (Some(rule), Some(push)) => format!(": rule {rule} (push {push})"),
+            (Some(rule), None) => format!(": rule {rule}"),
+            _ => String::new(),
+        };
+        println!("  {}{rule}", c.path);
+        if c.state != "ok" {
+            println!("    {}: {}", c.state, c.detail);
+            continue;
+        }
+        if !c.conflicts.is_empty() {
+            println!(
+                "    ! rules {} all match it: its pushes are refused until one is left",
+                c.conflicts.join(", ")
+            );
+        }
+        for remote in &c.forbidden {
+            println!(
+                "    ! remote {} -> {}: its rule does not allow it, a push there is refused",
+                remote.name,
+                remote.url.as_deref().unwrap_or("(no URL)")
+            );
+        }
+        if let Some(hook) = c.hook.as_ref().filter(|hook| !hook.runs) {
+            println!(
+                "    ! git runs hooks from {} and the pre-push there does not run the check",
+                hook.hooks_path.as_deref().unwrap_or("elsewhere")
+            );
+        }
+        for finding in &c.pushed_findings {
+            println!(
+                "    ! pushed commit {} {}: {} ({})",
+                finding.commit,
+                finding.place,
+                finding.kind.label(),
+                finding.shown
+            );
+        }
+        for reminder in c.hygiene.iter().flat_map(|h| &h.reminders) {
+            println!("    - {}: {}", reminder.text, reminder.fix);
+        }
+    }
+    if quiet > 0 {
+        println!("  {quiet} more checkout(s): no rule and nothing left lying around");
+    }
 }
 
 fn write_check(out: &mut impl std::io::Write, report: &CheckReport) -> std::io::Result<()> {

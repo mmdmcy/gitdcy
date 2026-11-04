@@ -18,6 +18,12 @@
 //! personal = ["Jane Doe"]
 //! allow = []
 //!
+//! # Reminders about work left lying around (scan and the push check); a
+//! # repository whose remote starts with a `skip` prefix keeps its own rules.
+//! [hygiene]
+//! branch_days = 3
+//! skip = ["github.com/example-employer/"]
+//!
 //! [[repo]]
 //! name = "example-app"
 //! first_commit = "0123456789abcdef0123456789abcdef01234567"
@@ -27,6 +33,7 @@
 //! note = "Customer data: it stays on our own forge."
 //! ```
 
+use super::hygiene::{self, GitHub, HygieneRules, Reminder};
 use super::personal::{self, Finding, ScanConfig};
 use super::{config_dir, expand_home, git_output, load_saved_local_config};
 use anyhow::{bail, Context, Result};
@@ -157,12 +164,19 @@ pub struct RulesFile {
     /// Private mail addresses that do belong in commits.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allow: Vec<String>,
+    /// Reminders about work left lying around (`gitdcy rules scan`, the push
+    /// check): on when this table is there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hygiene: Option<HygieneRules>,
     #[serde(default, rename = "repo", skip_serializing_if = "Vec::is_empty")]
     pub repos: Vec<RepoRule>,
 }
 
 impl RulesFile {
     fn validate(&self) -> Result<()> {
+        if let Some(hygiene) = &self.hygiene {
+            hygiene.validate()?;
+        }
         let mut names = BTreeSet::new();
         for rule in &self.repos {
             let name = rule.name.trim();
@@ -1098,6 +1112,33 @@ pub struct CheckReport {
     pub refused: bool,
     /// What was refused and the way forward, one line each.
     pub reasons: Vec<String>,
+    /// Work left lying around in the repository (the rules file's
+    /// `[hygiene]`): said before the push, never a reason to refuse it.
+    pub reminders: Vec<Reminder>,
+}
+
+/// How long the push check waits for GitHub's open pull requests.
+const HOOK_GH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The reminders for a push of `pushing` (commit ids) from this repository.
+fn push_reminders(found: &Found, pushing: &[String]) -> Vec<Reminder> {
+    let Some(rules) = found.file.as_ref().and_then(|f| f.hygiene.as_ref()) else {
+        return Vec::new();
+    };
+    let urls: Vec<String> = found
+        .repo
+        .remotes
+        .iter()
+        .flat_map(|(_, urls)| urls.iter().cloned())
+        .collect();
+    if rules.skipped_by(&urls).is_some() {
+        return Vec::new();
+    }
+    let github = match hygiene::github_repository(&urls) {
+        Some(place) => GitHub::ask_with("gh", &[], &[place], HOOK_GH_TIMEOUT),
+        None => GitHub::unknown("not on GitHub"),
+    };
+    hygiene::read(&found.repo.root, rules, &urls, &github, Some(pushing)).reminders
 }
 
 fn is_zero(sha: &str) -> bool {
@@ -1230,6 +1271,17 @@ pub fn check(rules_path: &Path, repo_path: &Path, request: &CheckRequest) -> Res
     if refused {
         reasons.push(QUESTION.into());
     }
+    let pushing: Vec<String> = match &request.refs {
+        Some(refs) => refs
+            .iter()
+            .filter(|pushed| !is_zero(&pushed.local_sha))
+            .map(|pushed| pushed.local_sha.clone())
+            .collect(),
+        None => git_output(&repo.root, ["rev-parse", "-q", "--verify", "HEAD"])
+            .map(|head| vec![head.trim().to_string()])
+            .unwrap_or_default(),
+    };
+    let reminders = push_reminders(&found, &pushing);
     Ok(CheckReport {
         repository: repo.root.display().to_string(),
         remote: Some(remote),
@@ -1251,6 +1303,7 @@ pub fn check(rules_path: &Path, repo_path: &Path, request: &CheckRequest) -> Res
         findings,
         refused,
         reasons,
+        reminders,
     })
 }
 

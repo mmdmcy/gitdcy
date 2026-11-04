@@ -12,9 +12,11 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub mod checkouts;
 pub mod facts;
+pub mod hygiene;
 pub mod personal;
 mod process;
 pub mod rules;
+pub mod scan;
 
 pub const APP_NAME: &str = "GitDCY";
 pub const SYNC_REMOTE: &str = "sync";

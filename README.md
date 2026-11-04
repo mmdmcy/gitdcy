@@ -344,6 +344,7 @@ gitdcy rules                       # which rule applies here, and why
 gitdcy rules --format json         # the same, for scripts
 gitdcy rules install               # pre-push hook and a copy of the rule into .git/
 gitdcy rules check                 # what a push of this branch would be refused for
+gitdcy rules scan                  # every checkout in the workspace against the rules
 ```
 
 `rules install` writes `.git/hooks/pre-push` and `.git/gitdcy-rules.toml`, a
@@ -369,8 +370,53 @@ missing gitdcy refuses the push too, so a rule is never skipped in silence.
 
 Exit codes: 0 when the push may go, 1 when it is refused or the command failed.
 With `--format json` the result is the `gitdcy.response.v1` envelope
-(operations `rules`, `rules.install`, `rules.check`), errors included; a refusal
-is `data.refused = true` with one line per reason in `data.reasons`.
+(operations `rules`, `rules.install`, `rules.check`, `rules.scan`), errors
+included; a refusal is `data.refused = true` with one line per reason in
+`data.reasons`.
+
+### Every checkout at once
+
+`gitdcy rules scan [PATH...] [--since DATE]` reads every checkout in the
+workspace (or the ones named) against the rules, without changing anything:
+per checkout its `rule` and where it may be pushed (`push`), its `remotes` with
+`allowed` for each, the ones its rule `forbidden`s (a self-hosted-only
+repository with a public remote), whether git runs the push check there
+(`hook`), and personal data in what already reached a remote since `--since`
+(`pushed_commits`, `pushed_findings`; the last 7 days by default, a bare date
+from the start of that day). The text lists only checkouts with something to
+say. A missing checkout is a warning; the exit code is 0 unless the command
+itself failed.
+
+### No dirty dishes
+
+With a `[hygiene]` table in the rules file, `rules scan` and `rules check` also
+remind of work left lying around, each reminder with what clears it:
+
+- a dirty tree (local changes not committed) or a pull not done (commits on the
+  upstream, as of the last fetch: nothing is fetched);
+- commits on no remote from before today, so they stayed unpushed past a day's
+  end (before a push: the ones that push leaves behind);
+- a branch not merged into the default branch (`origin/HEAD`, else
+  `origin/main` or `origin/master`, else a local `main` or `master`) for
+  `branch_days` or more, counted from its oldest commit the default branch lacks;
+- an open pull request on GitHub, read with `gh search prs` when `gh` is
+  installed and signed in (one search per owner for a scan); otherwise their
+  state is `unknown` and the reminder says why.
+
+```toml
+[hygiene]
+branch_days = 3                       # default
+skip = ["github.com/example-employer/"]   # repositories that keep their own rules
+```
+
+A repository whose remote starts with a `skip` prefix gets no reminders
+(`hygiene_off` says why), and without the table there are none at all. The push
+check prints its reminders on one line on standard error and never refuses a
+push for them; in JSON they are `data.reminders`, each with `kind` (`dirty`,
+`behind`, `unpushed`, `branch`, `pull-request`, `pull-requests-unknown`),
+`text` and `fix`. A scan's `hygiene` per checkout also holds the counts
+(`changed`, `behind`, `unpushed`, `unpushed_before_today`), `fetched_at`, the
+`branches` and the `pull_requests`.
 
 ## Checkouts
 

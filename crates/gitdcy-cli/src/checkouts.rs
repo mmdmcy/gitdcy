@@ -89,7 +89,7 @@ pub(crate) fn run(args: CheckoutsArgs) -> Result<()> {
     Ok(())
 }
 
-fn given_or_workspace(paths: Vec<String>) -> Result<Vec<String>> {
+pub(crate) fn given_or_workspace(paths: Vec<String>) -> Result<Vec<String>> {
     if !paths.is_empty() {
         return Ok(paths);
     }
