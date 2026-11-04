@@ -597,3 +597,223 @@ fn the_hook_refuses_when_gitdcy_is_gone() {
     assert!(!out.status.success(), "{said}");
     assert!(said.contains("gitdcy is not installed here"), "{said}");
 }
+
+/// A `gh` in front of the PATH that runs `answer` (a shell line).
+fn fake_gh(s: &mut Sandbox, answer: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    let bin = s.root.join("fakebin");
+    fs::create_dir_all(&bin).unwrap();
+    let gh = bin.join("gh");
+    fs::write(&gh, format!("#!/bin/sh\n{answer}\n")).unwrap();
+    fs::set_permissions(&gh, fs::Permissions::from_mode(0o755)).unwrap();
+    s.path = format!("{}:{}", bin.display(), s.path);
+}
+
+/// A commit dated `days` ago, on the branch checked out.
+fn old_commit(s: &Sandbox, work: &Path, file: &str, days: u64) {
+    let when = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        - days * 86_400;
+    fs::write(work.join(file), "old work\n").unwrap();
+    s.ok(work, &["add", file]);
+    let out = s
+        .command("git", work)
+        .args(["commit", "-qm", "old work"])
+        .env("GIT_AUTHOR_DATE", format!("@{when} +0000"))
+        .env("GIT_COMMITTER_DATE", format!("@{when} +0000"))
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", text(&out));
+}
+
+const ONE_PR: &str = r#"echo '[{"number":7,"title":"Fix the thing","url":"https://github.com/example-org/app/pull/7","createdAt":"2026-01-01T00:00:00Z","author":{"login":"someone"},"repository":{"nameWithOwner":"example-org/app"},"isDraft":false}]'"#;
+
+#[test]
+fn a_scan_names_each_rule_its_forbidden_remotes_and_pushed_personal_data() {
+    let s = Sandbox::new("scan");
+    let (work, first) = s.repo("app");
+    let (other, _) = s.repo("other");
+    // Made in the same second, both first commits would be one and the same.
+    s.ok(&other, &["commit", "-q", "--amend", "-m", "another first"]);
+    s.rules(&rule(&first, "\"selfhosted\"", ""));
+    s.ok(
+        &work,
+        &[
+            "remote",
+            "add",
+            "github",
+            "https://github.com/example-org/app.git",
+        ],
+    );
+    // What already reached a remote: a commit with a private address.
+    s.commit(&other, "NOTES", &format!("mail {}\n", private_address()));
+    s.ok(&other, &["push", "-q", "origin", "main"]);
+
+    let paths = [
+        work.to_str().unwrap(),
+        other.to_str().unwrap(),
+        "/nonexistent/x",
+    ];
+    let mut args = vec!["rules", "scan", "--format", "json"];
+    args.extend(paths);
+    let out = s.gitdcy(&s.root, &args);
+    let value = json(&out);
+    assert!(out.status.success(), "{}", text(&out));
+    assert_eq!(value["operation"], "rules.scan");
+    let checkouts = value["data"]["checkouts"].as_array().unwrap();
+    assert_eq!(checkouts.len(), 3);
+    let app = &checkouts[0];
+    assert_eq!(app["rule"], "example-app");
+    assert_eq!(app["forbidden"].as_array().unwrap().len(), 1, "{app}");
+    assert_eq!(app["forbidden"][0]["name"], "github");
+    assert_eq!(app["forbidden"][0]["url"], "github.com/example-org/app");
+    assert!(
+        app["hygiene"].is_null(),
+        "no [hygiene], no reminders: {app}"
+    );
+    let other = &checkouts[1];
+    assert!(other["rule"].is_null());
+    assert!(other["forbidden"].as_array().unwrap().is_empty());
+    assert_eq!(
+        other["pushed_findings"].as_array().unwrap().len(),
+        1,
+        "{other}"
+    );
+    assert!(
+        !other.to_string().contains(&private_address()),
+        "masked: {other}"
+    );
+    assert_eq!(checkouts[2]["state"], "missing");
+    assert_eq!(
+        value["outcome"], "partial",
+        "a missing checkout is a warning"
+    );
+
+    // The same in words: the forbidden remote and the pushed finding.
+    let mut args = vec!["rules", "scan"];
+    args.extend(&paths[..2]);
+    let said = text(&s.gitdcy(&s.root, &args));
+    assert!(
+        said.contains("remote github -> github.com/example-org/app"),
+        "{said}"
+    );
+    assert!(said.contains("pushed commit"), "{said}");
+}
+
+#[test]
+fn reminders_name_the_dirty_dishes_and_never_refuse_a_push() {
+    let mut s = Sandbox::new("dishes");
+    let (work, first) = s.repo("app");
+    s.ok(&work, &["push", "-q", "origin", "main"]);
+    s.ok(&work, &["branch", "-q", "--set-upstream-to=origin/main"]);
+    s.ok(
+        &work,
+        &[
+            "remote",
+            "add",
+            "github",
+            "https://github.com/example-org/app.git",
+        ],
+    );
+    s.rules(&format!(
+        "{}\n[hygiene]\nbranch_days = 3\n",
+        rule(&first, "\"anywhere\"", "")
+    ));
+    fake_gh(&mut s, ONE_PR);
+    s.ok(&work, &["checkout", "-qb", "old-idea"]);
+    old_commit(&s, &work, "IDEA", 10);
+    s.ok(&work, &["checkout", "-q", "main"]);
+    fs::write(work.join("README"), "changed\n").unwrap();
+
+    let out = s.gitdcy(&work, &["rules", "scan", "--format", "json", "."]);
+    let value = json(&out);
+    let dishes = &value["data"]["checkouts"][0]["hygiene"];
+    let kinds: Vec<&str> = dishes["reminders"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{value}"))
+        .iter()
+        .map(|r| r["kind"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        kinds,
+        ["dirty", "unpushed", "branch", "pull-request"],
+        "{dishes}"
+    );
+    assert_eq!(dishes["branches"][0]["branch"], "old-idea");
+    assert!(dishes["branches"][0]["days"].as_u64().unwrap() >= 10);
+    assert_eq!(dishes["unpushed_before_today"], 1);
+    assert_eq!(dishes["pull_requests"]["open"][0]["number"], 7);
+
+    // Before a push: the reminders, and the push goes.
+    s.gitdcy(&work, &["rules", "install"]);
+    s.ok(&work, &["checkout", "-q", "--", "README"]);
+    s.commit(&work, "NEW", "new\n");
+    let out = s.git(&work, &["push", "-q", "origin", "main"]);
+    let said = text(&out);
+    assert!(out.status.success(), "a reminder never refuses: {said}");
+    assert!(said.contains("left lying around"), "{said}");
+    assert!(
+        said.contains("branch old-idea not merged into origin/main"),
+        "{said}"
+    );
+    assert!(said.contains("pull request #7 open"), "{said}");
+    assert!(
+        said.contains("1 commit(s) on other branches are on no remote"),
+        "what the push leaves behind: {said}"
+    );
+}
+
+#[test]
+fn without_gh_pull_requests_are_unknown_and_a_skipped_repository_gets_no_reminders() {
+    let mut s = Sandbox::new("unknown");
+    let (work, first) = s.repo("app");
+    s.ok(
+        &work,
+        &[
+            "remote",
+            "add",
+            "github",
+            "https://github.com/example-org/app.git",
+        ],
+    );
+    fake_gh(
+        &mut s,
+        "echo 'To get started with GitHub CLI, please run:  gh auth login' >&2; exit 4",
+    );
+    s.rules(&format!(
+        "{}\n[hygiene]\n",
+        rule(&first, "\"anywhere\"", "")
+    ));
+    let out = s.gitdcy(&work, &["rules", "scan", "--format", "json", "."]);
+    let dishes = &json(&out)["data"]["checkouts"][0]["hygiene"];
+    assert_eq!(dishes["pull_requests"]["state"], "unknown", "{dishes}");
+    let unknown = dishes["reminders"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["kind"] == "pull-requests-unknown")
+        .unwrap_or_else(|| panic!("{dishes}"));
+    assert!(
+        unknown["text"].as_str().unwrap().contains("gh auth login"),
+        "{unknown}"
+    );
+
+    s.rules(&format!(
+        "{}\n[hygiene]\nskip = [\"github.com/Example-Org/\"]\n",
+        rule(&first, "\"anywhere\"", "")
+    ));
+    let out = s.gitdcy(&work, &["rules", "scan", "--format", "json", "."]);
+    let checkout = &json(&out)["data"]["checkouts"][0];
+    assert!(checkout["hygiene"].is_null(), "{checkout}");
+    assert!(
+        checkout["hygiene_off"]
+            .as_str()
+            .unwrap()
+            .contains("keeps its own rules"),
+        "{checkout}"
+    );
+    let out = s.gitdcy(&work, &["rules", "check", "--format", "json"]);
+    assert_eq!(json(&out)["data"]["reminders"], serde_json::json!([]));
+}
