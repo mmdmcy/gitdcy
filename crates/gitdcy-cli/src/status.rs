@@ -1,14 +1,45 @@
-use clap::ValueEnum;
+use clap::builder::{EnumValueParser, PossibleValue};
+use clap::{Arg, ArgAction, ArgMatches, ValueEnum};
 use gitdcy_core::error::Result;
 use gitdcy_core::{load_or_discover_manifest, status_all, RepoStatus};
 use serde::Serialize;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-#[derive(Debug, Clone, Copy, Default, ValueEnum)]
+#[derive(Debug, Clone, Copy, Default)]
 pub(crate) enum OutputFormat {
     #[default]
     Human,
     Json,
+}
+
+impl ValueEnum for OutputFormat {
+    fn value_variants<'a>() -> &'a [Self] {
+        &[Self::Human, Self::Json]
+    }
+
+    fn to_possible_value(&self) -> Option<PossibleValue> {
+        Some(PossibleValue::new(match self {
+            Self::Human => "human",
+            Self::Json => "json",
+        }))
+    }
+}
+
+/// `--format human|json`, which every command with a report takes.
+pub(crate) fn format_arg() -> Arg {
+    Arg::new("format")
+        .long("format")
+        .value_name("FORMAT")
+        .value_parser(EnumValueParser::<OutputFormat>::new())
+        .default_value("human")
+        .action(ArgAction::Set)
+}
+
+pub(crate) fn format(matches: &ArgMatches) -> OutputFormat {
+    matches
+        .get_one::<OutputFormat>("format")
+        .copied()
+        .unwrap_or_default()
 }
 
 pub(crate) fn status(format: OutputFormat) -> Result<()> {

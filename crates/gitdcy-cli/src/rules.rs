@@ -2,7 +2,7 @@
 //! checkout, the check the pre-push hook runs, and the scan of every checkout.
 
 use crate::status::{print_json, OutputFormat};
-use clap::{Args, Subcommand};
+use clap::{Arg, ArgAction, ArgMatches};
 use gitdcy_core::error::{Context, Result};
 use gitdcy_core::hygiene::Reminder;
 use gitdcy_core::rules::{
@@ -13,8 +13,43 @@ use serde::Serialize;
 use std::io::Read;
 use std::path::PathBuf;
 
-#[derive(Debug, Args)]
-#[command(after_help = "Examples:
+#[derive(Debug)]
+pub(crate) struct RulesArgs {
+    command: Option<RulesCommand>,
+    rules: Option<PathBuf>,
+    repo: Option<PathBuf>,
+    format: OutputFormat,
+}
+
+#[derive(Debug)]
+enum RulesCommand {
+    Install,
+    Check {
+        stdin: bool,
+        remote: Option<String>,
+        url: Option<String>,
+    },
+    Scan {
+        paths: Vec<String>,
+        since: Option<String>,
+    },
+}
+
+pub(crate) fn command() -> clap::Command {
+    let path = |id: &'static str, value: &'static str| {
+        Arg::new(id)
+            .long(id)
+            .value_name(value)
+            .value_parser(clap::value_parser!(PathBuf))
+            .action(ArgAction::Set)
+            .global(true)
+    };
+    let text = |id: &'static str, value: &'static str| {
+        Arg::new(id).value_name(value).action(ArgAction::Set)
+    };
+    clap::Command::new("rules")
+        .after_help(
+            "Examples:
   gitdcy rules                      which rule applies to this repository, and why
   gitdcy rules --format json        the same, for scripts
   gitdcy rules install              hook and a copy of the rule into .git/
@@ -26,47 +61,78 @@ The rules file is the one given with --rules, else rules_file in GitDCY's
 local.yaml, else rules.toml in GitDCY's config folder. With a [hygiene] table
 in it, scan and check also remind of work left lying around: a dirty tree or a
 pull not done, commits on no remote from before today, a branch not merged
-after branch_days (3), and open pull requests (GitHub's, through gh).")]
-pub(crate) struct RulesArgs {
-    #[command(subcommand)]
-    command: Option<RulesCommand>,
-    /// The rules file.
-    #[arg(long, global = true, value_name = "FILE")]
-    rules: Option<PathBuf>,
-    /// The repository (default: the current folder).
-    #[arg(long, global = true, value_name = "PATH")]
-    repo: Option<PathBuf>,
-    #[arg(long, value_enum, default_value = "human", global = true)]
-    format: OutputFormat,
+after branch_days (3), and open pull requests (GitHub's, through gh).",
+        )
+        .subcommands([
+            clap::Command::new("install").about(
+                "Write a pre-push hook and a copy of this repository's rule into its git \
+                 folder, so the rule holds on a machine without the rules file",
+            ),
+            clap::Command::new("check")
+                .about(
+                    "Refuse a push the rule does not allow, and read the commits it sends for \
+                     personal data (what the pre-push hook runs)",
+                )
+                .arg(
+                    Arg::new("stdin")
+                        .long("stdin")
+                        .action(ArgAction::SetTrue)
+                        .help(
+                            "Read the refs being pushed from standard input, as git gives them \
+                             to a pre-push hook",
+                        ),
+                )
+                .arg(text("remote", "REMOTE").help("The remote's name (default: origin)"))
+                .arg(text("url", "URL").help("The remote's URL (default: its push URL)")),
+            clap::Command::new("scan")
+                .about(
+                    "Every checkout against the rules, read only: its rule, the remotes the rule \
+                     forbids, personal data in what already reached a remote, and the reminders \
+                     about work left lying around",
+                )
+                .arg(
+                    text("paths", "PATH")
+                        .num_args(1..)
+                        .action(ArgAction::Append)
+                        .help(
+                            "Checkouts to read (default: --repo, else every repository in the \
+                             workspace)",
+                        ),
+                )
+                .arg(text("since", "DATE").long("since").help(
+                    "Read what reached a remote since then (git's --since: 2026-10-24, \"3 days \
+                     ago\"; default 7 days)",
+                )),
+        ])
+        .arg(path("rules", "FILE").help("The rules file"))
+        .arg(path("repo", "PATH").help("The repository (default: the current folder)"))
+        .arg(crate::status::format_arg().global(true))
 }
 
-#[derive(Debug, Subcommand)]
-enum RulesCommand {
-    /// Write a pre-push hook and a copy of this repository's rule into its
-    /// git folder, so the rule holds on a machine without the rules file.
-    Install,
-    /// Refuse a push the rule does not allow, and read the commits it sends
-    /// for personal data (what the pre-push hook runs).
-    Check {
-        /// Read the refs being pushed from standard input, as git gives them to a pre-push hook.
-        #[arg(long)]
-        stdin: bool,
-        /// The remote's name (default: origin).
-        remote: Option<String>,
-        /// The remote's URL (default: its push URL).
-        url: Option<String>,
-    },
-    /// Every checkout against the rules, read only: its rule, the remotes the
-    /// rule forbids, personal data in what already reached a remote, and the
-    /// reminders about work left lying around.
-    Scan {
-        /// Checkouts to read (default: --repo, else every repository in the workspace).
-        #[arg(value_name = "PATH")]
-        paths: Vec<String>,
-        /// Read what reached a remote since then (git's --since: 2026-10-24, "3 days ago"; default 7 days).
-        #[arg(long, value_name = "DATE")]
-        since: Option<String>,
-    },
+impl RulesArgs {
+    pub(crate) fn from_matches(m: &ArgMatches) -> RulesArgs {
+        let text = |m: &ArgMatches, id: &str| m.get_one::<String>(id).cloned();
+        RulesArgs {
+            command: m.subcommand().map(|(name, m)| match name {
+                "install" => RulesCommand::Install,
+                "check" => RulesCommand::Check {
+                    stdin: m.get_flag("stdin"),
+                    remote: text(m, "remote"),
+                    url: text(m, "url"),
+                },
+                _ => RulesCommand::Scan {
+                    paths: m
+                        .get_many::<String>("paths")
+                        .map(|paths| paths.cloned().collect())
+                        .unwrap_or_default(),
+                    since: text(m, "since"),
+                },
+            }),
+            rules: m.get_one::<PathBuf>("rules").cloned(),
+            repo: m.get_one::<PathBuf>("repo").cloned(),
+            format: crate::status::format(m),
+        }
+    }
 }
 
 /// Runs `gitdcy rules ...`; the exit code is 1 when a push is refused or the

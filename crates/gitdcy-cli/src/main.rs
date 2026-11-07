@@ -1,4 +1,5 @@
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::builder::{EnumValueParser, PossibleValue};
+use clap::{Arg, ArgAction, ArgMatches, ValueEnum};
 use gitdcy_core::bail;
 use gitdcy_core::error::{Context, Result};
 use gitdcy_core::{
@@ -20,54 +21,37 @@ mod status;
 
 use status::{status, OutputFormat};
 
-#[derive(Debug, Parser)]
-#[command(name = "gitdcy")]
-#[command(about = "Private Git-only multi-device workspace client")]
-struct Args {
-    #[command(subcommand)]
-    command: Command,
-}
-
-#[derive(Debug, Subcommand)]
+#[derive(Debug)]
 enum Command {
     Doctor,
     Status {
-        #[arg(long, value_enum, default_value = "human")]
         format: OutputFormat,
     },
     Check {
-        #[arg(long)]
         all: bool,
         repo: Option<String>,
     },
     Dashboard,
     Identity {
-        #[command(subcommand)]
         command: IdentityCommand,
     },
     Audit {
-        #[arg(long)]
         all: bool,
-        #[arg(long)]
         explain: bool,
         repo: Option<String>,
     },
     Policy {
-        #[command(subcommand)]
         command: PolicyCommand,
     },
     InstallIgnore {
-        #[arg(long)]
         global: bool,
     },
     Sync {
-        #[arg(long)]
         all: bool,
         repo: Option<String>,
     },
     Commit {
         repo: String,
-        #[arg(short, long)]
         message: String,
     },
     Push {
@@ -83,65 +67,55 @@ enum Command {
     },
     TrustDevice {
         device: String,
-        #[arg(long)]
         repo: Option<String>,
-        #[arg(long)]
         all: bool,
     },
     Clone {
         url: String,
-        #[arg(long)]
         root: Option<PathBuf>,
-        #[arg(long, value_enum)]
         provider: Option<ProviderArg>,
-        #[arg(long)]
         name: Option<String>,
     },
     SaveManifest,
-    /// Each repository's rules: where it may be pushed, branches that take only
-    /// a pull request, and the personal-data check before a push.
     Rules(rules::RulesArgs),
-    /// Checkouts against their upstream: up to date, behind, ahead, diverged,
-    /// local changes or missing; `update` fast-forwards only what is safe.
     Checkouts(checkouts::CheckoutsArgs),
-    /// How two commits of a repository relate: equal, ahead, behind, diverged
-    /// or unrelated, with the commits only on each side counted.
     Relate(relate::RelateArgs),
-    /// Moving work between two checkouts of a repository: send it, place it
-    /// (branches only where the name is free), set it aside.
     Carry(carry::CarryArgs),
 }
 
-#[derive(Debug, Subcommand)]
+#[derive(Debug)]
 enum PolicyCommand {
-    Status {
-        #[arg(long)]
-        all: bool,
-        repo: Option<String>,
-    },
-    Plan {
-        repo: String,
-    },
-    Apply {
-        repo: String,
-    },
+    Status { all: bool, repo: Option<String> },
+    Plan { repo: String },
+    Apply { repo: String },
 }
 
-#[derive(Debug, Subcommand)]
+#[derive(Debug)]
 enum IdentityCommand {
-    Status {
-        #[arg(long)]
-        all: bool,
-        repo: Option<String>,
-    },
+    Status { all: bool, repo: Option<String> },
 }
 
-#[derive(Debug, Clone, Copy, ValueEnum)]
+#[derive(Debug, Clone, Copy)]
 enum ProviderArg {
     Github,
     Forgejo,
     Gitlab,
     Other,
+}
+
+impl ValueEnum for ProviderArg {
+    fn value_variants<'a>() -> &'a [Self] {
+        &[Self::Github, Self::Forgejo, Self::Gitlab, Self::Other]
+    }
+
+    fn to_possible_value(&self) -> Option<PossibleValue> {
+        Some(PossibleValue::new(match self {
+            Self::Github => "github",
+            Self::Forgejo => "forgejo",
+            Self::Gitlab => "gitlab",
+            Self::Other => "other",
+        }))
+    }
 }
 
 impl From<ProviderArg> for Provider {
@@ -155,9 +129,179 @@ impl From<ProviderArg> for Provider {
     }
 }
 
+/// The command line: every subcommand, argument and help text.
+fn cli() -> clap::Command {
+    let all = || Arg::new("all").long("all").action(ArgAction::SetTrue);
+    let repo = || Arg::new("repo").value_name("REPO").action(ArgAction::Set);
+    let name = |id: &'static str, value: &'static str| {
+        Arg::new(id).value_name(value).action(ArgAction::Set)
+    };
+    let needs_one = |command: clap::Command| {
+        command
+            .subcommand_required(true)
+            .arg_required_else_help(true)
+    };
+    needs_one(clap::Command::new("gitdcy").about("Private Git-only multi-device workspace client"))
+        .subcommands([
+            clap::Command::new("doctor"),
+            clap::Command::new("status").arg(status::format_arg()),
+            clap::Command::new("check").arg(all()).arg(repo()),
+            clap::Command::new("dashboard"),
+            needs_one(clap::Command::new("identity"))
+                .subcommand(clap::Command::new("status").arg(all()).arg(repo())),
+            clap::Command::new("audit")
+                .arg(all())
+                .arg(
+                    Arg::new("explain")
+                        .long("explain")
+                        .action(ArgAction::SetTrue),
+                )
+                .arg(repo()),
+            needs_one(clap::Command::new("policy")).subcommands([
+                clap::Command::new("status").arg(all()).arg(repo()),
+                clap::Command::new("plan").arg(repo().required(true)),
+                clap::Command::new("apply").arg(repo().required(true)),
+            ]),
+            clap::Command::new("install-ignore")
+                .arg(Arg::new("global").long("global").action(ArgAction::SetTrue)),
+            clap::Command::new("sync").arg(all()).arg(repo()),
+            clap::Command::new("commit").arg(repo().required(true)).arg(
+                name("message", "MESSAGE")
+                    .short('m')
+                    .long("message")
+                    .required(true),
+            ),
+            clap::Command::new("push").arg(repo().required(true)),
+            clap::Command::new("set-sync-remote")
+                .arg(repo().required(true))
+                .arg(name("url", "URL").required(true)),
+            clap::Command::new("set-origin-remote")
+                .arg(repo().required(true))
+                .arg(name("url", "URL")),
+            clap::Command::new("trust-device")
+                .arg(name("device", "DEVICE").required(true))
+                .arg(repo().long("repo"))
+                .arg(all()),
+            clap::Command::new("clone")
+                .arg(name("url", "URL").required(true))
+                .arg(
+                    name("root", "ROOT")
+                        .long("root")
+                        .value_parser(clap::value_parser!(PathBuf)),
+                )
+                .arg(
+                    name("provider", "PROVIDER")
+                        .long("provider")
+                        .value_parser(EnumValueParser::<ProviderArg>::new()),
+                )
+                .arg(name("name", "NAME").long("name")),
+            clap::Command::new("save-manifest"),
+            rules::command().about(
+                "Each repository's rules: where it may be pushed, branches that take only a pull \
+             request, and the personal-data check before a push",
+            ),
+            checkouts::command().about(
+                "Checkouts against their upstream: up to date, behind, ahead, diverged, local \
+             changes or missing; `update` fast-forwards only what is safe",
+            ),
+            relate::command().about(
+                "How two commits of a repository relate: equal, ahead, behind, diverged or \
+             unrelated, with the commits only on each side counted",
+            ),
+            carry::command().about(
+                "Moving work between two checkouts of a repository: send it, place it (branches \
+             only where the name is free), set it aside",
+            ),
+        ])
+}
+
+/// What the command line asked for, from what `cli()` matched.
+fn parse(matches: &ArgMatches) -> Command {
+    let flag = |m: &ArgMatches, id: &str| m.get_flag(id);
+    let text = |m: &ArgMatches, id: &str| m.get_one::<String>(id).cloned();
+    let given = |m: &ArgMatches, id: &str| text(m, id).unwrap_or_default();
+    let (name, m) = matches.subcommand().expect("a subcommand is required");
+    match name {
+        "doctor" => Command::Doctor,
+        "status" => Command::Status {
+            format: status::format(m),
+        },
+        "check" => Command::Check {
+            all: flag(m, "all"),
+            repo: text(m, "repo"),
+        },
+        "dashboard" => Command::Dashboard,
+        "identity" => {
+            let (_, m) = m.subcommand().expect("a subcommand is required");
+            Command::Identity {
+                command: IdentityCommand::Status {
+                    all: flag(m, "all"),
+                    repo: text(m, "repo"),
+                },
+            }
+        }
+        "audit" => Command::Audit {
+            all: flag(m, "all"),
+            explain: flag(m, "explain"),
+            repo: text(m, "repo"),
+        },
+        "policy" => Command::Policy {
+            command: match m.subcommand().expect("a subcommand is required") {
+                ("status", m) => PolicyCommand::Status {
+                    all: flag(m, "all"),
+                    repo: text(m, "repo"),
+                },
+                ("plan", m) => PolicyCommand::Plan {
+                    repo: given(m, "repo"),
+                },
+                (_, m) => PolicyCommand::Apply {
+                    repo: given(m, "repo"),
+                },
+            },
+        },
+        "install-ignore" => Command::InstallIgnore {
+            global: flag(m, "global"),
+        },
+        "sync" => Command::Sync {
+            all: flag(m, "all"),
+            repo: text(m, "repo"),
+        },
+        "commit" => Command::Commit {
+            repo: given(m, "repo"),
+            message: given(m, "message"),
+        },
+        "push" => Command::Push {
+            repo: given(m, "repo"),
+        },
+        "set-sync-remote" => Command::SetSyncRemote {
+            repo: given(m, "repo"),
+            url: given(m, "url"),
+        },
+        "set-origin-remote" => Command::SetOriginRemote {
+            repo: given(m, "repo"),
+            url: text(m, "url"),
+        },
+        "trust-device" => Command::TrustDevice {
+            device: given(m, "device"),
+            repo: text(m, "repo"),
+            all: flag(m, "all"),
+        },
+        "clone" => Command::Clone {
+            url: given(m, "url"),
+            root: m.get_one::<PathBuf>("root").cloned(),
+            provider: m.get_one::<ProviderArg>("provider").copied(),
+            name: text(m, "name"),
+        },
+        "save-manifest" => Command::SaveManifest,
+        "rules" => Command::Rules(rules::RulesArgs::from_matches(m)),
+        "checkouts" => Command::Checkouts(checkouts::CheckoutsArgs::from_matches(m)),
+        "relate" => Command::Relate(relate::RelateArgs::from_matches(m)),
+        _ => Command::Carry(carry::CarryArgs::from_matches(m)),
+    }
+}
+
 fn main() -> Result<()> {
-    let args = Args::parse();
-    match args.command {
+    match parse(&cli().get_matches()) {
         Command::Doctor => doctor(),
         Command::Status { format } => status(format),
         Command::Check { all, repo } => check(all, repo),

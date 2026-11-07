@@ -1,15 +1,31 @@
 //! `gitdcy relate`: how two commits of a repository relate.
 
 use crate::status::{print_json, OutputFormat};
-use clap::Args;
+use clap::{Arg, ArgAction, ArgMatches};
 use gitdcy_core::bail;
 use gitdcy_core::error::{Context, Result};
 use gitdcy_core::relate::{self, Relation};
 use serde::Serialize;
 use std::io::Read;
 
-#[derive(Debug, Args)]
-#[command(after_help = "Examples:
+#[derive(Debug)]
+pub(crate) struct RelateArgs {
+    commits: Vec<String>,
+    repo: Option<String>,
+    stdin: bool,
+    list: Option<usize>,
+    format: OutputFormat,
+}
+
+#[derive(Serialize)]
+struct Report {
+    relations: Vec<Relation>,
+}
+
+pub(crate) fn command() -> clap::Command {
+    clap::Command::new("relate")
+        .after_help(
+            "Examples:
   gitdcy relate main origin/main            this repository's main against its upstream
   gitdcy relate --repo ~/code/app 1a2b3c HEAD --format json
   printf '%s\\t%s\\t%s\\n' ~/code/app 1a2b3c HEAD | gitdcy relate --stdin --format json
@@ -18,27 +34,53 @@ Relations: equal, ahead (A holds all of B and more), behind (B holds all of A
 and more), diverged (each has commits the other lacks), unrelated (no common
 history) and missing (no repository there, or A or B is not in it). ahead
 and behind count the commits only in A and only in B. Read-only: nothing is
-fetched, and git runs without the repository's hooks or fsmonitor.")]
-pub(crate) struct RelateArgs {
-    /// A, then B: commits or refs.
-    #[arg(value_name = "COMMIT", num_args = 0..=2)]
-    commits: Vec<String>,
-    /// The repository (default: the current folder).
-    #[arg(long, value_name = "PATH")]
-    repo: Option<String>,
-    /// Read PATH<TAB>A<TAB>B lines from standard input instead, answered in order.
-    #[arg(long, conflicts_with_all = ["commits", "repo"])]
-    stdin: bool,
-    /// Also list up to N commits only in A and only in B, newest first.
-    #[arg(long, value_name = "N")]
-    list: Option<usize>,
-    #[arg(long, value_enum, default_value = "human")]
-    format: OutputFormat,
+fetched, and git runs without the repository's hooks or fsmonitor.",
+        )
+        .arg(
+            Arg::new("commits")
+                .value_name("COMMIT")
+                .num_args(0..=2)
+                .action(ArgAction::Append)
+                .help("A, then B: commits or refs"),
+        )
+        .arg(
+            Arg::new("repo")
+                .long("repo")
+                .value_name("PATH")
+                .action(ArgAction::Set)
+                .help("The repository (default: the current folder)"),
+        )
+        .arg(
+            Arg::new("stdin")
+                .long("stdin")
+                .action(ArgAction::SetTrue)
+                .conflicts_with_all(["commits", "repo"])
+                .help("Read PATH<TAB>A<TAB>B lines from standard input instead, answered in order"),
+        )
+        .arg(
+            Arg::new("list")
+                .long("list")
+                .value_name("N")
+                .value_parser(clap::value_parser!(usize))
+                .action(ArgAction::Set)
+                .help("Also list up to N commits only in A and only in B, newest first"),
+        )
+        .arg(crate::status::format_arg())
 }
 
-#[derive(Serialize)]
-struct Report {
-    relations: Vec<Relation>,
+impl RelateArgs {
+    pub(crate) fn from_matches(m: &ArgMatches) -> RelateArgs {
+        RelateArgs {
+            commits: m
+                .get_many::<String>("commits")
+                .map(|commits| commits.cloned().collect())
+                .unwrap_or_default(),
+            repo: m.get_one::<String>("repo").cloned(),
+            stdin: m.get_flag("stdin"),
+            list: m.get_one::<usize>("list").copied(),
+            format: crate::status::format(m),
+        }
+    }
 }
 
 /// Runs `gitdcy relate ...`; exit 1 only when the command itself failed

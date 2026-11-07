@@ -2,15 +2,48 @@
 //! fast-forward.
 
 use crate::status::{print_json, OutputFormat};
-use clap::{Args, Subcommand};
+use clap::{Arg, ArgAction, ArgMatches};
 use gitdcy_core::checkouts::{self, Checkout, Options};
 use gitdcy_core::error::Result;
 use gitdcy_core::facts::Facts;
 use gitdcy_core::load_or_discover_manifest;
 use serde::Serialize;
 
-#[derive(Debug, Args)]
-#[command(after_help = "Examples:
+#[derive(Debug)]
+pub(crate) struct CheckoutsArgs {
+    command: Option<CheckoutsCommand>,
+    paths: Vec<String>,
+    no_fetch: bool,
+    facts: bool,
+    format: OutputFormat,
+}
+
+#[derive(Debug)]
+enum CheckoutsCommand {
+    Update { paths: Vec<String> },
+}
+
+#[derive(Serialize)]
+struct Report {
+    checkouts: Vec<Checkout>,
+}
+
+pub(crate) fn command() -> clap::Command {
+    let paths = || {
+        Arg::new("paths")
+            .value_name("PATH")
+            .num_args(1..)
+            .action(ArgAction::Append)
+    };
+    let flag = |id: &'static str, long: &'static str| {
+        Arg::new(id)
+            .long(long)
+            .action(ArgAction::SetTrue)
+            .global(true)
+    };
+    clap::Command::new("checkouts")
+        .after_help(
+            "Examples:
   gitdcy checkouts                         every repository in the workspace
   gitdcy checkouts ~/code/app ~/code/lib   these checkouts
   gitdcy checkouts --no-fetch --format json
@@ -27,36 +60,45 @@ fsmonitor; only the fetch and update's fast-forward run git as configured.
 --facts adds what a tool moving the checkout to another device needs, as
 `facts` in the JSON: the full head id, stash ids, commits on no remote,
 notable ignored files by name, fingerprints of the local changes and the
-working tree's id (computed without writing to the repository).")]
-pub(crate) struct CheckoutsArgs {
-    #[command(subcommand)]
-    command: Option<CheckoutsCommand>,
-    /// Checkouts to read (default: every repository in the workspace).
-    #[arg(value_name = "PATH")]
-    paths: Vec<String>,
-    /// Do not fetch first: show what the last fetch knew.
-    #[arg(long, global = true)]
-    no_fetch: bool,
-    /// Also report what moving each checkout needs (slower: hashes local changes).
-    #[arg(long, global = true)]
-    facts: bool,
-    #[arg(long, value_enum, default_value = "human", global = true)]
-    format: OutputFormat,
+working tree's id (computed without writing to the repository).",
+        )
+        .subcommand(
+            clap::Command::new("update")
+                .about(
+                    "Fast-forward the checkouts that are behind and have no local changes or \
+                     commits",
+                )
+                .arg(
+                    paths()
+                        .help("Checkouts to update (default: every repository in the workspace)"),
+                ),
+        )
+        .arg(paths().help("Checkouts to read (default: every repository in the workspace)"))
+        .arg(flag("no_fetch", "no-fetch").help("Do not fetch first: show what the last fetch knew"))
+        .arg(
+            flag("facts", "facts")
+                .help("Also report what moving each checkout needs (slower: hashes local changes)"),
+        )
+        .arg(crate::status::format_arg().global(true))
 }
 
-#[derive(Debug, Subcommand)]
-enum CheckoutsCommand {
-    /// Fast-forward the checkouts that are behind and have no local changes or commits.
-    Update {
-        /// Checkouts to update (default: every repository in the workspace).
-        #[arg(value_name = "PATH")]
-        paths: Vec<String>,
-    },
-}
-
-#[derive(Serialize)]
-struct Report {
-    checkouts: Vec<Checkout>,
+impl CheckoutsArgs {
+    pub(crate) fn from_matches(m: &ArgMatches) -> CheckoutsArgs {
+        let paths = |m: &ArgMatches| {
+            m.get_many::<String>("paths")
+                .map(|paths| paths.cloned().collect())
+                .unwrap_or_default()
+        };
+        CheckoutsArgs {
+            command: m
+                .subcommand()
+                .map(|(_, m)| CheckoutsCommand::Update { paths: paths(m) }),
+            paths: paths(m),
+            no_fetch: m.get_flag("no_fetch"),
+            facts: m.get_flag("facts"),
+            format: crate::status::format(m),
+        }
+    }
 }
 
 /// Runs `gitdcy checkouts ...`; exit 1 only when the command itself failed
