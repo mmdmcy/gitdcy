@@ -23,7 +23,7 @@ xcode-select --install
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 git clone https://github.com/<owner>/gitdcy.git
 cd gitdcy
-cargo run -p gitdcy-gui
+cargo run --manifest-path crates/gitdcy-gui/Cargo.toml
 ```
 
 ### Windows 11
@@ -35,7 +35,7 @@ install Visual Studio Build Tools with the C++ desktop workload.
 winget install Git.Git Rustlang.Rustup
 git clone https://github.com/<owner>/gitdcy.git
 cd gitdcy
-cargo run -p gitdcy-gui
+cargo run --manifest-path crates/gitdcy-gui/Cargo.toml
 ```
 
 ### Linux Mint / Ubuntu
@@ -46,7 +46,7 @@ sudo apt install -y build-essential git pkg-config libx11-dev libxcb1-dev libxkb
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 git clone https://github.com/<owner>/gitdcy.git
 cd gitdcy
-cargo run -p gitdcy-gui
+cargo run --manifest-path crates/gitdcy-gui/Cargo.toml
 ```
 
 Useful CLI checks:
@@ -645,11 +645,15 @@ cargo run -p gitdcy-cli -- policy apply <repo>
 
 ```bash
 cargo build --release --workspace
+cargo build --release --manifest-path crates/gitdcy-gui/Cargo.toml
 ```
+
+The GUI is its own Cargo workspace with its own `Cargo.lock`, so the root
+lock lists only what the CLI is built from.
 
 Binary paths:
 
-- macOS/Linux GUI: `target/release/gitdcy-gui`
+- macOS/Linux GUI: `crates/gitdcy-gui/target/release/gitdcy-gui`
 - macOS/Linux CLI: `target/release/gitdcy`
-- Windows GUI: `target\release\gitdcy-gui.exe`
+- Windows GUI: `crates\gitdcy-gui\target\release\gitdcy-gui.exe`
 - Windows CLI: `target\release\gitdcy.exe`

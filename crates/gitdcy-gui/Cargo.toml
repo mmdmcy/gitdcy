@@ -1,15 +1,19 @@
 [package]
 name = "gitdcy-gui"
 version = "0.1.0"
-edition.workspace = true
-license.workspace = true
+edition = "2021"
+license = "MIT"
 
 [[bin]]
 name = "gitdcy-gui"
 path = "src/main.rs"
 
 [dependencies]
-eframe.workspace = true
-egui.workspace = true
+eframe = "0.34.3"
+egui = "0.34.3"
 gitdcy-core = { path = "../gitdcy-core" }
 rfd = "0.17.2"
+
+# Its own workspace: build it with
+# cargo build --manifest-path crates/gitdcy-gui/Cargo.toml
+[workspace]
