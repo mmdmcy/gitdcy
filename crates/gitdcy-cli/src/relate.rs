@@ -1,8 +1,9 @@
 //! `gitdcy relate`: how two commits of a repository relate.
 
 use crate::status::{print_json, OutputFormat};
-use anyhow::{bail, Context, Result};
 use clap::Args;
+use gitdcy_core::bail;
+use gitdcy_core::error::{Context, Result};
 use gitdcy_core::relate::{self, Relation};
 use serde::Serialize;
 use std::io::Read;

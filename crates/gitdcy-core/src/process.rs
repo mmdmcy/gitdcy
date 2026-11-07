@@ -1,4 +1,5 @@
-use anyhow::{anyhow, bail, Context, Result};
+use crate::error::{Context, Result};
+use crate::{bail, err};
 use std::io::Read;
 use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -40,11 +41,11 @@ pub(crate) fn run_bounded_command(
         let stdout = child
             .stdout
             .take()
-            .ok_or_else(|| anyhow!("bounded command stdout was not captured"))?;
+            .ok_or_else(|| err!("bounded command stdout was not captured"))?;
         let stderr = child
             .stderr
             .take()
-            .ok_or_else(|| anyhow!("bounded command stderr was not captured"))?;
+            .ok_or_else(|| err!("bounded command stderr was not captured"))?;
         set_nonblocking(&stdout).context("configure bounded command stdout")?;
         set_nonblocking(&stderr).context("configure bounded command stderr")?;
         let stop_readers = Arc::new(AtomicBool::new(false));
@@ -73,11 +74,11 @@ pub(crate) fn run_bounded_command(
         stop_readers.store(true, Ordering::Release);
         let (stdout, stdout_truncated) = stdout_reader
             .join()
-            .map_err(|_| anyhow!("bounded stdout reader panicked"))?
+            .map_err(|_| err!("bounded stdout reader panicked"))?
             .context("read bounded stdout")?;
         let (stderr, stderr_truncated) = stderr_reader
             .join()
-            .map_err(|_| anyhow!("bounded stderr reader panicked"))?
+            .map_err(|_| err!("bounded stderr reader panicked"))?
             .context("read bounded stderr")?;
         if stdout_truncated || stderr_truncated {
             bail!("bounded command exceeded its output safety limit");

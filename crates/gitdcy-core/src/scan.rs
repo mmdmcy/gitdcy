@@ -9,7 +9,7 @@ use super::expand_home;
 use super::hygiene::{self, GitHub, Hygiene, HygieneRules};
 use super::personal::{self, Finding, ScanConfig};
 use super::rules::{read_rules, rules_report, HookState, RemoteState, RuleSource, RulesReport};
-use anyhow::Result;
+use crate::error::Result;
 use serde::Serialize;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};

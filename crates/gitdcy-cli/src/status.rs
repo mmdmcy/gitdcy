@@ -1,5 +1,5 @@
-use anyhow::Result;
 use clap::ValueEnum;
+use gitdcy_core::error::Result;
 use gitdcy_core::{load_or_discover_manifest, status_all, RepoStatus};
 use serde::Serialize;
 use std::time::{SystemTime, UNIX_EPOCH};

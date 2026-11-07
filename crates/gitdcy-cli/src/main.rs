@@ -1,5 +1,6 @@
-use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
+use gitdcy_core::bail;
+use gitdcy_core::error::{Context, Result};
 use gitdcy_core::{
     apply_policy, audit_all, audit_repo, check_repo, clone_repo, commit, default_workspace_root,
     format_audit_block, install_global_ignore_template, load_local_config,

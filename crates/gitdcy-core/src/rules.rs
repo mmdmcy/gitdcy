@@ -36,7 +36,8 @@
 use super::hygiene::{self, GitHub, HygieneRules, Reminder};
 use super::personal::{self, Finding, ScanConfig};
 use super::{config_dir, expand_home, git_output, load_saved_local_config};
-use anyhow::{bail, Context, Result};
+use crate::bail;
+use crate::error::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::fs;

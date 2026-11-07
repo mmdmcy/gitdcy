@@ -1,9 +1,9 @@
 //! `gitdcy carry`: moving work between two checkouts of one repository.
 
 use crate::status::{print_json, OutputFormat};
-use anyhow::Result;
 use clap::{Args, Subcommand};
 use gitdcy_core::carry::{self, Place, Send};
+use gitdcy_core::error::Result;
 use std::path::PathBuf;
 
 #[derive(Debug, Args)]

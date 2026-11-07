@@ -8,7 +8,8 @@
 //! hold is `missing`, never looked up elsewhere.
 
 use super::{command_error, expand_home, reading_git_command};
-use anyhow::{bail, Result};
+use crate::bail;
+use crate::error::Result;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 

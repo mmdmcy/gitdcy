@@ -2,9 +2,9 @@
 //! fast-forward.
 
 use crate::status::{print_json, OutputFormat};
-use anyhow::Result;
 use clap::{Args, Subcommand};
 use gitdcy_core::checkouts::{self, Checkout, Options};
+use gitdcy_core::error::Result;
 use gitdcy_core::facts::Facts;
 use gitdcy_core::load_or_discover_manifest;
 use serde::Serialize;

@@ -13,7 +13,7 @@
 //! refusal does not print the data it refuses.
 
 use super::git_output;
-use anyhow::Result;
+use crate::error::Result;
 use serde::Serialize;
 use std::collections::BTreeSet;
 use std::path::Path;

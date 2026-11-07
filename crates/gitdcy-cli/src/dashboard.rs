@@ -5,7 +5,7 @@
 //! what the ratatui version drew: the same panes and sizes (ratatui's layout
 //! solver's results, worked out below), colours and keys.
 
-use anyhow::{Context, Result};
+use gitdcy_core::error::{Context, Result};
 use gitdcy_core::{load_or_discover_manifest, status_all, sync_repo, RepoStatus};
 use std::collections::VecDeque;
 use std::io::{self, Write};
