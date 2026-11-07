@@ -6,7 +6,6 @@ license.workspace = true
 
 [dependencies]
 anyhow.workspace = true
-directories.workspace = true
 libc.workspace = true
 serde.workspace = true
 serde_json.workspace = true

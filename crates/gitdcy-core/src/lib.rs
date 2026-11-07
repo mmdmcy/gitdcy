@@ -1,5 +1,4 @@
 use anyhow::{anyhow, bail, Context, Result};
-use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
@@ -714,13 +713,33 @@ pub struct LocalConfig {
     pub config_error: Option<String>,
 }
 
-pub fn project_dirs() -> Result<ProjectDirs> {
-    ProjectDirs::from("dev", "gitdcy", "GitDCY")
+/// GitDCY's config folder, where the `directories` crate (6.0) put it, so the
+/// files already there stay found: `$XDG_CONFIG_HOME/gitdcy` (when absolute,
+/// else `~/.config/gitdcy`) on Linux and the other Unix systems,
+/// `~/Library/Application Support/dev.gitdcy.GitDCY` on macOS and
+/// `%APPDATA%\gitdcy\GitDCY\config` on Windows. The home folder is `$HOME`
+/// when set and not empty, else the user's entry in the password database.
+pub fn config_dir() -> Result<PathBuf> {
+    config_dir_from(|name| env::var_os(name), env::home_dir)
         .ok_or_else(|| anyhow!("could not determine config directory"))
 }
 
-pub fn config_dir() -> Result<PathBuf> {
-    Ok(project_dirs()?.config_dir().to_path_buf())
+#[allow(unused_variables)]
+fn config_dir_from(
+    var: impl Fn(&str) -> Option<std::ffi::OsString>,
+    home: impl Fn() -> Option<PathBuf>,
+) -> Option<PathBuf> {
+    let absolute = |name: &str| var(name).map(PathBuf::from).filter(|path| path.is_absolute());
+    #[cfg(windows)]
+    return absolute("APPDATA").map(|roaming| roaming.join("gitdcy").join("GitDCY").join("config"));
+    #[cfg(target_os = "macos")]
+    return home().map(|home| home.join("Library/Application Support/dev.gitdcy.GitDCY"));
+    #[cfg(not(any(windows, target_os = "macos")))]
+    return home().map(|home| {
+        absolute("XDG_CONFIG_HOME")
+            .unwrap_or_else(|| home.join(".config"))
+            .join("gitdcy")
+    });
 }
 
 pub fn local_config_path() -> Result<PathBuf> {
@@ -3857,6 +3876,34 @@ fn expand_home(path: PathBuf) -> PathBuf {
 mod tests {
     use super::*;
     use std::process::Command;
+
+    #[cfg(not(any(windows, target_os = "macos")))]
+    #[test]
+    fn config_dir_is_where_the_directories_crate_put_it() {
+        let home = || Some(PathBuf::from("/home/u"));
+        let xdg = |value: &'static str| {
+            move |name: &str| (name == "XDG_CONFIG_HOME").then(|| value.into())
+        };
+        assert_eq!(
+            config_dir_from(|_| None, home),
+            Some(PathBuf::from("/home/u/.config/gitdcy"))
+        );
+        assert_eq!(
+            config_dir_from(xdg("/etc/xdg-u"), home),
+            Some(PathBuf::from("/etc/xdg-u/gitdcy"))
+        );
+        // A relative or empty XDG_CONFIG_HOME is ignored, as the spec says.
+        assert_eq!(
+            config_dir_from(xdg("rel/conf"), home),
+            Some(PathBuf::from("/home/u/.config/gitdcy"))
+        );
+        assert_eq!(
+            config_dir_from(xdg(""), home),
+            Some(PathBuf::from("/home/u/.config/gitdcy"))
+        );
+        // No home folder: no config folder, even with XDG_CONFIG_HOME set.
+        assert_eq!(config_dir_from(xdg("/etc/xdg-u"), || None), None);
+    }
 
     #[test]
     fn read_only_status_workers_preserve_manifest_order() {
