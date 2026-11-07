@@ -3,7 +3,8 @@
 //! alternate screen, the keyboard read in raw mode (termios on Unix, the
 //! console API on Windows), so no terminal library is compiled in. It draws
 //! what the ratatui version drew: the same panes and sizes (ratatui's layout
-//! solver's results, worked out below), colours and keys.
+//! solver's results, worked out below), colours and keys, except the footer:
+//! three rows now, so its log line shows (in two it was only border).
 
 use gitdcy_core::error::{Context, Result};
 use gitdcy_core::{load_or_discover_manifest, status_all, sync_repo, RepoStatus};
@@ -547,11 +548,12 @@ fn columns(width: u16) -> [(u16, u16); 4] {
 pub(crate) fn draw(view: &View, width: u16, height: u16) -> Screen {
     let mut screen = Screen::new(width, height);
 
-    // Rows: the panes take at least 12, the findings 9 and the footer 2;
-    // short of room the findings and footer share what is left after 12.
-    let top = height.min(12.max(height.saturating_sub(11)));
+    // Rows: the panes take at least 12, the findings 9 and the footer 3 (its
+    // border and the log line); short of room the findings and the footer
+    // share what is left after 12.
+    let top = height.min(12.max(height.saturating_sub(12)));
     let rest = height - top;
-    let footer = (rest / 2).min(2);
+    let footer = (rest / 2).min(3);
     let findings = rest - footer;
     // Columns: 58 and 42 per cent, rounded half up.
     let left = ((u32::from(width) * 58 + 50) / 100) as u16;
@@ -982,7 +984,8 @@ mod tests {
             log: "refreshed".into(),
         };
         // The frame ratatui 0.30 drew for this view (compared cell by cell
-        // with it at every size up to 130 by 40 when it was replaced).
+        // with it at every size up to 130 by 40 when it was replaced), with
+        // the footer three rows high since.
         let screen = draw(&view, 60, 24);
         let expected = [
             "┌GitDCY Dashboard─────────────────┐┌Selected Repo──────────┐",
@@ -994,17 +997,25 @@ mod tests {
             assert_eq!(row(&screen, y as u16), *line);
         }
         assert_eq!(
-            row(&screen, 12),
+            row(&screen, 11),
             format!("└{}┘└{}┘", "─".repeat(33), "─".repeat(23))
         );
-        assert_eq!(row(&screen, 13), format!("┌Findings{}┐", "─".repeat(50)));
+        assert_eq!(row(&screen, 12), format!("┌Findings{}┐", "─".repeat(50)));
         assert_eq!(
-            row(&screen, 14),
+            row(&screen, 13),
             format!("│No safety or identity findings.{}│", " ".repeat(27))
         );
-        // The footer's two rows are its border: the log line never showed.
-        assert_eq!(row(&screen, 22), format!("┌{}┐", "─".repeat(58)));
+        assert_eq!(row(&screen, 20), format!("└{}┘", "─".repeat(58)));
+        // The footer: its border and the log line.
+        assert_eq!(row(&screen, 21), format!("┌{}┐", "─".repeat(58)));
+        assert_eq!(row(&screen, 22), format!("│refreshed{}│", " ".repeat(49)));
         assert_eq!(row(&screen, 23), format!("└{}┘", "─".repeat(58)));
+        // Every size draws, the smallest included.
+        for height in 0..=40 {
+            for width in 0..=80 {
+                draw(&view, width, height);
+            }
+        }
         let at = |x: u16, y: u16| &screen.cells[usize::from(y) * 60 + usize::from(x)];
         assert!(at(1, 1).style.yellow && at(1, 1).style.bold);
         assert!(at(1, 3).style.reversed && !at(1, 2).style.reversed);
