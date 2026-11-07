@@ -729,7 +729,11 @@ fn config_dir_from(
     var: impl Fn(&str) -> Option<std::ffi::OsString>,
     home: impl Fn() -> Option<PathBuf>,
 ) -> Option<PathBuf> {
-    let absolute = |name: &str| var(name).map(PathBuf::from).filter(|path| path.is_absolute());
+    let absolute = |name: &str| {
+        var(name)
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute())
+    };
     #[cfg(windows)]
     return absolute("APPDATA").map(|roaming| roaming.join("gitdcy").join("GitDCY").join("config"));
     #[cfg(target_os = "macos")]
