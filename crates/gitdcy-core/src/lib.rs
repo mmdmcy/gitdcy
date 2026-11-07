@@ -1,4 +1,4 @@
-use anyhow::{anyhow, bail, Context, Result};
+use crate::error::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
@@ -11,6 +11,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub mod carry;
 pub mod checkouts;
+pub mod error;
 pub mod facts;
 pub mod hygiene;
 pub mod personal;
@@ -721,7 +722,7 @@ pub struct LocalConfig {
 /// when set and not empty, else the user's entry in the password database.
 pub fn config_dir() -> Result<PathBuf> {
     config_dir_from(|name| env::var_os(name), env::home_dir)
-        .ok_or_else(|| anyhow!("could not determine config directory"))
+        .ok_or_else(|| err!("could not determine config directory"))
 }
 
 #[allow(unused_variables)]
@@ -1016,7 +1017,7 @@ impl DiscoveryBudget {
         self.directories = self
             .directories
             .checked_add(1)
-            .ok_or_else(|| anyhow!("repository discovery directory count overflow"))?;
+            .ok_or_else(|| err!("repository discovery directory count overflow"))?;
         if self.directories > DISCOVERY_MAX_DIRECTORIES {
             bail!("repository discovery exceeded its directory safety limit");
         }
@@ -1027,7 +1028,7 @@ impl DiscoveryBudget {
         self.repositories = self
             .repositories
             .checked_add(1)
-            .ok_or_else(|| anyhow!("repository discovery count overflow"))?;
+            .ok_or_else(|| err!("repository discovery count overflow"))?;
         if self.repositories > self.max_repositories {
             bail!("repository discovery exceeded its repository safety limit");
         }

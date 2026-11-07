@@ -47,14 +47,14 @@ pub struct HygieneRules {
 }
 
 impl HygieneRules {
-    pub(crate) fn validate(&self) -> anyhow::Result<()> {
+    pub(crate) fn validate(&self) -> crate::error::Result<()> {
         if self.branch_days == 0 {
-            anyhow::bail!(
+            crate::bail!(
                 "[hygiene] branch_days = 0 would remind of every branch at once; say 1 or more"
             );
         }
         if self.skip.iter().any(|prefix| prefix.trim().is_empty()) {
-            anyhow::bail!("[hygiene] an empty prefix in skip");
+            crate::bail!("[hygiene] an empty prefix in skip");
         }
         Ok(())
     }

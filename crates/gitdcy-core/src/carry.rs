@@ -25,7 +25,8 @@
 
 use super::relate::{self, git};
 use super::{command_error, reading_git_command};
-use anyhow::{bail, Context, Result};
+use crate::bail;
+use crate::error::{Context, Result};
 use serde::Serialize;
 use std::ffi::OsString;
 use std::fs;
@@ -341,7 +342,7 @@ fn fast_forward(dir: &Path, prefix: &str, branch: &str) -> Result<Placed> {
             &format!("{carried}^{{commit}}"),
         ],
     )
-    .map_err(|_| anyhow::anyhow!("nothing was carried as {carried}"))?;
+    .map_err(|_| crate::err!("nothing was carried as {carried}"))?;
     let left = |text: String| line("left", branch, text);
     let on = git(dir, &["symbolic-ref", "-q", "--short", "HEAD"]).unwrap_or_default();
     if on != branch {

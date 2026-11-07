@@ -2,8 +2,8 @@
 //! checkout, the check the pre-push hook runs, and the scan of every checkout.
 
 use crate::status::{print_json, OutputFormat};
-use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
+use gitdcy_core::error::{Context, Result};
 use gitdcy_core::hygiene::Reminder;
 use gitdcy_core::rules::{
     self, parse_pushed_refs, CheckReport, CheckRequest, InstallReport, RuleSource, RulesReport,

@@ -9,7 +9,6 @@ name = "gitdcy"
 path = "src/main.rs"
 
 [dependencies]
-anyhow.workspace = true
 clap.workspace = true
 gitdcy-core = { path = "../gitdcy-core" }
 serde.workspace = true
