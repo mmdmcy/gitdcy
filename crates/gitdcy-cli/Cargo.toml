@@ -11,8 +11,9 @@ path = "src/main.rs"
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
-crossterm.workspace = true
 gitdcy-core = { path = "../gitdcy-core" }
-ratatui.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true

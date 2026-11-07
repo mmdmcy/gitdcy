@@ -1,10 +1,5 @@
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
-use crossterm::{
-    event::{self, Event, KeyCode},
-    execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
-};
 use gitdcy_core::{
     apply_policy, audit_all, audit_repo, check_repo, clone_repo, commit, default_workspace_root,
     format_audit_block, install_global_ignore_template, load_local_config,
@@ -13,20 +8,11 @@ use gitdcy_core::{
     status_all, sync_repo, CheckResultState, CloneRequest, Provider, RepoCheckReport,
     RepoPolicyReport, RepoSafetyReport, RepoStatus,
 };
-use ratatui::{
-    backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout},
-    style::{Color, Modifier, Style},
-    text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, Paragraph, Row, Table, TableState},
-    Terminal,
-};
-use std::io;
 use std::path::PathBuf;
-use std::time::Duration;
 
 mod carry;
 mod checkouts;
+mod dashboard;
 mod relate;
 mod rules;
 mod status;
@@ -174,7 +160,7 @@ fn main() -> Result<()> {
         Command::Doctor => doctor(),
         Command::Status { format } => status(format),
         Command::Check { all, repo } => check(all, repo),
-        Command::Dashboard => dashboard(),
+        Command::Dashboard => dashboard::run(),
         Command::Identity { command } => identity(command),
         Command::Audit { all, explain, repo } => audit(all, explain, repo),
         Command::Policy { command } => policy(command),
@@ -580,245 +566,6 @@ fn install_ignore(global: bool) -> Result<()> {
     let path = install_global_ignore_template()?;
     println!("installed GitDCY global ignore block in {}", path.display());
     Ok(())
-}
-
-fn dashboard() -> Result<()> {
-    enable_raw_mode().context("enable raw mode")?;
-    let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen).context("enter alternate screen")?;
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend).context("create terminal")?;
-    let result = run_dashboard(&mut terminal);
-    disable_raw_mode().ok();
-    execute!(terminal.backend_mut(), LeaveAlternateScreen).ok();
-    terminal.show_cursor().ok();
-    result
-}
-
-fn run_dashboard(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
-    let mut manifest = load_or_discover_manifest()?;
-    let mut statuses = status_all(&manifest);
-    let mut selected = 0usize;
-    let mut log =
-        "q quit | r refresh | j/k or arrows move | s sync selected | S sync all safe".to_string();
-
-    loop {
-        if selected >= statuses.len() {
-            selected = statuses.len().saturating_sub(1);
-        }
-        terminal.draw(|frame| {
-            let area = frame.area();
-            let chunks = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Min(12),
-                    Constraint::Length(9),
-                    Constraint::Length(2),
-                ])
-                .split(area);
-            let main = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([Constraint::Percentage(58), Constraint::Percentage(42)])
-                .split(chunks[0]);
-
-            let rows = statuses.iter().map(|status| {
-                let branch = status.branch.as_deref().unwrap_or("-");
-                let safety = status.safety.short_state();
-                Row::new(vec![
-                    status.entry.id.clone(),
-                    branch.to_string(),
-                    status.short_state(),
-                    safety,
-                ])
-            });
-            let mut table_state = TableState::default();
-            if !statuses.is_empty() {
-                table_state.select(Some(selected));
-            }
-            let table = Table::new(
-                rows,
-                [
-                    Constraint::Percentage(32),
-                    Constraint::Percentage(18),
-                    Constraint::Percentage(30),
-                    Constraint::Percentage(20),
-                ],
-            )
-            .header(
-                Row::new(vec!["repo", "branch", "state", "safety"]).style(
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD),
-                ),
-            )
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title("GitDCY Dashboard"),
-            )
-            .row_highlight_style(Style::default().add_modifier(Modifier::REVERSED));
-            frame.render_stateful_widget(table, main[0], &mut table_state);
-
-            let detail = statuses
-                .get(selected)
-                .map(status_detail_lines)
-                .unwrap_or_else(|| vec![Line::from("No repositories discovered.")]);
-            let detail = Paragraph::new(detail).block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title("Selected Repo"),
-            );
-            frame.render_widget(detail, main[1]);
-
-            let findings = statuses
-                .get(selected)
-                .map(finding_items)
-                .unwrap_or_default();
-            let findings =
-                List::new(findings).block(Block::default().borders(Borders::ALL).title("Findings"));
-            frame.render_widget(findings, chunks[1]);
-
-            let footer = Paragraph::new(log.as_str()).block(Block::default().borders(Borders::ALL));
-            frame.render_widget(footer, chunks[2]);
-        })?;
-
-        if !event::poll(Duration::from_millis(250))? {
-            continue;
-        }
-        let Event::Key(key) = event::read()? else {
-            continue;
-        };
-        match key.code {
-            KeyCode::Char('q') => return Ok(()),
-            KeyCode::Char('r') => {
-                manifest = load_or_discover_manifest()?;
-                statuses = status_all(&manifest);
-                log = "refreshed".to_string();
-            }
-            KeyCode::Down | KeyCode::Char('j') if selected + 1 < statuses.len() => {
-                selected += 1;
-            }
-            KeyCode::Up | KeyCode::Char('k') => {
-                selected = selected.saturating_sub(1);
-            }
-            KeyCode::Char('s') => {
-                if let Some(status) = statuses.get(selected) {
-                    if status.safety.has_fatal_findings() {
-                        log = format!("sync blocked for {}: safety findings", status.entry.id);
-                    } else {
-                        let report = sync_repo(&status.entry);
-                        log = if let Some(blocked) = report.blocked {
-                            format!("sync blocked for {}: {blocked}", status.entry.id)
-                        } else {
-                            format!("synced {}", status.entry.id)
-                        };
-                        statuses = status_all(&manifest);
-                    }
-                }
-            }
-            KeyCode::Char('S') => {
-                let mut synced = 0usize;
-                let mut blocked = 0usize;
-                for status in &statuses {
-                    if status.safety.has_fatal_findings() {
-                        blocked += 1;
-                        continue;
-                    }
-                    let report = sync_repo(&status.entry);
-                    if report.blocked.is_some() {
-                        blocked += 1;
-                    } else {
-                        synced += 1;
-                    }
-                }
-                statuses = status_all(&manifest);
-                log = format!("sync all safe: {synced} synced, {blocked} blocked/skipped");
-            }
-            _ => {}
-        }
-    }
-}
-
-fn status_detail_lines(status: &RepoStatus) -> Vec<Line<'static>> {
-    let mut lines = vec![
-        Line::from(vec![
-            Span::styled("id: ", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(status.entry.id.clone()),
-        ]),
-        Line::from(vec![
-            Span::styled("path: ", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(status.path.display().to_string()),
-        ]),
-        Line::from(vec![
-            Span::styled("branch: ", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(status.branch.clone().unwrap_or_else(|| "-".to_string())),
-        ]),
-        Line::from(vec![
-            Span::styled("tracking: ", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(
-                status
-                    .tracking_branch
-                    .clone()
-                    .unwrap_or_else(|| "-".to_string()),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled(
-                "visibility: ",
-                Style::default().add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(status.safety.visibility.label().to_string()),
-        ]),
-        Line::from(vec![
-            Span::styled("state: ", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(status.short_state()),
-        ]),
-        Line::from(vec![
-            Span::styled("identity: ", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(status.identity.short_state()),
-        ]),
-    ];
-    if status.identity.state_label() != "identity-ok"
-        && status.identity.state_label() != "identity-unchecked"
-    {
-        lines.push(Line::from(format!(
-            "identity note: {}",
-            status.identity.message
-        )));
-    }
-    if status.remotes.is_empty() {
-        lines.push(Line::from("remotes: -"));
-    } else {
-        lines.push(Line::from("remotes:"));
-        for (name, url) in &status.remotes {
-            lines.push(Line::from(format!("  {name}: {url}")));
-        }
-    }
-    lines
-}
-
-fn finding_items(status: &RepoStatus) -> Vec<ListItem<'static>> {
-    let mut items = Vec::new();
-    if status.identity.state_label() != "identity-ok"
-        && status.identity.state_label() != "identity-unchecked"
-    {
-        items.push(ListItem::new(format!(
-            "[identity] {}",
-            status.identity.message
-        )));
-    }
-    items.extend(status.safety.findings.iter().map(|finding| {
-        let path = finding.path.as_deref().unwrap_or("-");
-        ListItem::new(format!(
-            "[{}] {path}: {}",
-            finding.severity.label(),
-            finding.reason
-        ))
-    }));
-    if items.is_empty() {
-        items.push(ListItem::new("No safety or identity findings."));
-    }
-    items
 }
 
 fn sync(all: bool, repo: Option<String>) -> Result<()> {
