@@ -1,13 +1,54 @@
 //! `gitdcy carry`: moving work between two checkouts of one repository.
 
 use crate::status::{print_json, OutputFormat};
-use clap::{Args, Subcommand};
+use clap::{Arg, ArgAction, ArgMatches};
 use gitdcy_core::carry::{self, Place, Send};
 use gitdcy_core::error::Result;
 use std::path::PathBuf;
 
-#[derive(Debug, Args)]
-#[command(after_help = "Examples:
+#[derive(Debug)]
+pub(crate) struct CarryArgs {
+    command: CarryCommand,
+    repo: Option<PathBuf>,
+    format: OutputFormat,
+}
+
+#[derive(Debug)]
+enum CarryCommand {
+    Send {
+        to: String,
+        from: String,
+        operation: String,
+        head: Option<String>,
+        tips: Vec<String>,
+        stashes: Vec<String>,
+        worktree: bool,
+        message: Option<String>,
+    },
+    Place {
+        from: String,
+        operation: String,
+        fast_forward: Option<String>,
+        message: Option<String>,
+    },
+    Aside {
+        reference: String,
+        message: String,
+    },
+}
+
+pub(crate) fn command() -> clap::Command {
+    let option = |id: &'static str, long: &'static str, value: &'static str| {
+        Arg::new(id)
+            .long(long)
+            .value_name(value)
+            .action(ArgAction::Set)
+    };
+    let from = |help: &'static str| option("from", "from", "NAME").required(true).help(help);
+    let operation = || option("operation", "operation", "ID").required(true);
+    clap::Command::new("carry")
+        .after_help(
+            "Examples:
   gitdcy carry send host:code/app --from laptop --operation 1 --tip feature --stash stash@{0} --worktree
   gitdcy carry place --from laptop --operation 1                (in the receiving checkout)
   gitdcy carry send host:code/app --from laptop --operation 2 --head HEAD
@@ -31,67 +72,116 @@ out, to the carried head, only when it is behind and only as a fast-forward.
 aside stashes the uncommitted work, untracked files included, keeps it under
 the ref given and takes it off the stash list: git stash apply REF brings it
 back. Nothing is forced, reset or deleted; the refs/carry/ refs stay as the
-record.")]
-pub(crate) struct CarryArgs {
-    #[command(subcommand)]
-    command: CarryCommand,
-    /// The checkout (default: the current folder).
-    #[arg(long, global = true, value_name = "PATH")]
-    repo: Option<PathBuf>,
-    #[arg(long, value_enum, default_value = "human", global = true)]
-    format: OutputFormat,
+record.",
+        )
+        .subcommand_required(true)
+        .arg_required_else_help(true)
+        .subcommands([
+            clap::Command::new("send")
+                .about("Push this checkout's work into another checkout of the repository")
+                .arg(
+                    Arg::new("to")
+                        .value_name("TO")
+                        .required(true)
+                        .action(ArgAction::Set)
+                        .help(
+                            "The other checkout, the way git push names it (host:path, a URL, a \
+                             path)",
+                        ),
+                )
+                .arg(from("This side's name; the work arrives under refs/carry/FROM/"))
+                .arg(operation().help("A name for this carry, so repeated carries stay apart"))
+                .arg(
+                    option("head", "head", "COMMIT")
+                        .help("A commit for the other side's place --fast-forward"),
+                )
+                .arg(
+                    option("tips", "tip", "COMMIT")
+                        .action(ArgAction::Append)
+                        .help("A local branch tip; repeat"),
+                )
+                .arg(
+                    option("stashes", "stash", "COMMIT")
+                        .action(ArgAction::Append)
+                        .help("A stash entry, newest first; repeat"),
+                )
+                .arg(
+                    Arg::new("worktree")
+                        .long("worktree")
+                        .action(ArgAction::SetTrue)
+                        .help("The working tree, uncommitted and untracked files included"),
+                )
+                .arg(option("message", "message", "TEXT").help("The working-tree commit's message")),
+            clap::Command::new("place")
+                .about(
+                    "Turn what another checkout sent into branches, stash entries and the working \
+                     tree",
+                )
+                .arg(from("The sending side's name, as it sent it"))
+                .arg(operation())
+                .arg(
+                    option("fast_forward", "fast-forward", "BRANCH")
+                        .help("Fast-forward this branch to the carried head instead"),
+                )
+                .arg(
+                    option("message", "message", "TEXT")
+                        .help("The stash entries' message (default: carried from FROM)"),
+                ),
+            clap::Command::new("aside")
+                .about("Stash the uncommitted work under a ref of its own, off the stash list")
+                .arg(
+                    option("reference", "as", "REF")
+                        .required(true)
+                        .help("The ref that keeps it (refs/...)"),
+                )
+                .arg(option("message", "message", "TEXT").default_value("set aside by gitdcy carry")),
+        ])
+        .arg(
+            option("repo", "repo", "PATH")
+                .value_parser(clap::value_parser!(PathBuf))
+                .global(true)
+                .help("The checkout (default: the current folder)"),
+        )
+        .arg(crate::status::format_arg().global(true))
 }
 
-#[derive(Debug, Subcommand)]
-enum CarryCommand {
-    /// Push this checkout's work into another checkout of the repository.
-    Send {
-        /// The other checkout, the way git push names it (host:path, a URL, a path).
-        to: String,
-        /// This side's name; the work arrives under refs/carry/FROM/.
-        #[arg(long, value_name = "NAME")]
-        from: String,
-        /// A name for this carry, so repeated carries stay apart.
-        #[arg(long, value_name = "ID")]
-        operation: String,
-        /// A commit for the other side's place --fast-forward.
-        #[arg(long, value_name = "COMMIT")]
-        head: Option<String>,
-        /// A local branch tip; repeat.
-        #[arg(long = "tip", value_name = "COMMIT")]
-        tips: Vec<String>,
-        /// A stash entry, newest first; repeat.
-        #[arg(long = "stash", value_name = "COMMIT")]
-        stashes: Vec<String>,
-        /// The working tree, uncommitted and untracked files included.
-        #[arg(long)]
-        worktree: bool,
-        /// The working-tree commit's message.
-        #[arg(long, value_name = "TEXT")]
-        message: Option<String>,
-    },
-    /// Turn what another checkout sent into branches, stash entries and the working tree.
-    Place {
-        /// The sending side's name, as it sent it.
-        #[arg(long, value_name = "NAME")]
-        from: String,
-        #[arg(long, value_name = "ID")]
-        operation: String,
-        /// Fast-forward this branch to the carried head instead.
-        #[arg(long, value_name = "BRANCH")]
-        fast_forward: Option<String>,
-        /// The stash entries' message (default: carried from FROM).
-        #[arg(long, value_name = "TEXT")]
-        message: Option<String>,
-    },
-    /// Stash the uncommitted work under a ref of its own, off the stash list.
-    Aside {
-        /// The ref that keeps it (refs/...).
-        #[arg(long = "as", value_name = "REF")]
-        reference: String,
-        #[arg(long, value_name = "TEXT", default_value = "set aside by gitdcy carry")]
-        message: String,
-    },
+impl CarryArgs {
+    pub(crate) fn from_matches(m: &ArgMatches) -> CarryArgs {
+        let text = |m: &ArgMatches, id: &str| m.get_one::<String>(id).cloned();
+        let given = |m: &ArgMatches, id: &str| text(m, id).unwrap_or_default();
+        let many = |m: &ArgMatches, id: &str| {
+            m.get_many::<String>(id)
+                .map(|values| values.cloned().collect())
+                .unwrap_or_default()
+        };
+        let (name, sub) = m.subcommand().expect("a subcommand is required");
+        CarryArgs {
+            command: match name {
+                "send" => CarryCommand::Send {
+                    to: given(sub, "to"),
+                    from: given(sub, "from"),
+                    operation: given(sub, "operation"),
+                    head: text(sub, "head"),
+                    tips: many(sub, "tips"),
+                    stashes: many(sub, "stashes"),
+                    worktree: sub.get_flag("worktree"),
+                    message: text(sub, "message"),
+                },
+                "place" => CarryCommand::Place {
+                    from: given(sub, "from"),
+                    operation: given(sub, "operation"),
+                    fast_forward: text(sub, "fast_forward"),
+                    message: text(sub, "message"),
+                },
+                _ => CarryCommand::Aside {
+                    reference: given(sub, "reference"),
+                    message: given(sub, "message"),
+                },
+            },
+            repo: m.get_one::<PathBuf>("repo").cloned(),
+            format: crate::status::format(m),
+        }
+    }
 }
 
 /// Runs `gitdcy carry ...`; exit 1 when it could not be done (`--format
