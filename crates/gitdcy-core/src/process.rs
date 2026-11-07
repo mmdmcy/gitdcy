@@ -1,14 +1,23 @@
 use crate::error::{Context, Result};
-use crate::{bail, err};
-use std::io::Read;
-use std::process::{Command, Output, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-use std::thread;
-use std::time::{Duration, Instant};
+use std::process::{Command, Output};
+use std::time::Duration;
 
 #[cfg(unix)]
+use crate::{bail, err};
+#[cfg(unix)]
+use std::io::Read;
+#[cfg(unix)]
 use std::os::unix::process::CommandExt;
+#[cfg(unix)]
+use std::process::Stdio;
+#[cfg(unix)]
+use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(unix)]
+use std::sync::Arc;
+#[cfg(unix)]
+use std::thread;
+#[cfg(unix)]
+use std::time::Instant;
 
 pub(crate) fn run_bounded_command(
     mut command: Command,
