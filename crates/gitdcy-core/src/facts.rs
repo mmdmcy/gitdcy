@@ -351,6 +351,7 @@ pub(crate) fn scratch_folder() -> Option<PathBuf> {
         std::process::id(),
         COUNTER.fetch_add(1, Ordering::Relaxed)
     ));
+    #[cfg_attr(not(unix), allow(unused_mut))]
     let mut builder = fs::DirBuilder::new();
     #[cfg(unix)]
     std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
