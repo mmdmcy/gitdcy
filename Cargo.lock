@@ -1554,9 +1554,7 @@ dependencies = [
  "serde_json",
  "serde_norway",
  "sha2",
- "thiserror 2.0.18",
  "toml",
- "walkdir",
 ]
 
 [[package]]
