@@ -245,7 +245,7 @@ mod tests {
     /// are settings GitDCY reads, every key kept.
     #[test]
     fn the_examples_are_settings_gitdcy_reads() {
-        let example = include_str!("../../../.gitdcy.local.example.toml");
+        let example = include_str!("../../../../.gitdcy.local.example.toml");
         let uncommented: String = example
             .lines()
             .map(|line| match line.strip_prefix("# ") {
@@ -255,7 +255,7 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n");
-        let readme = include_str!("../../../README.md");
+        let readme = include_str!("../../../../README.md");
         let blocks = readme
             .split("```toml\n")
             .skip(1)
