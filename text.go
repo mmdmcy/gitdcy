@@ -12,18 +12,22 @@ import (
 // trim is Rust's str::trim (Unicode White_Space on both ends).
 func trim(s string) string { return strings.TrimSpace(s) }
 
-// lines is Rust's str::lines: split at "\n", a trailing "\r" dropped from
-// each line, and no empty last line for text that ends with "\n".
+// lines is Rust's str::lines: split at "\n", a "\r" before the "\n"
+// dropped (a last line without "\n" keeps its "\r"), and no empty last line
+// for text that ends with "\n".
 func lines(s string) []string {
 	if s == "" {
 		return nil
 	}
 	parts := strings.Split(s, "\n")
-	if parts[len(parts)-1] == "" {
-		parts = parts[:len(parts)-1]
+	last := len(parts) - 1
+	if parts[last] == "" {
+		parts = parts[:last]
 	}
 	for i, p := range parts {
-		parts[i] = strings.TrimSuffix(p, "\r")
+		if i < last {
+			parts[i] = strings.TrimSuffix(p, "\r")
+		}
 	}
 	return parts
 }
@@ -45,7 +49,8 @@ func isASCIIAlnum(c rune) bool {
 }
 
 // rustDebug is a string as Rust's {:?} showed it: in double quotes, with
-// \t \r \n \\ \" \0 and \u{..} for characters that do not print.
+// \t \r \n \\ \" \0 and \u{..} for characters that do not print and for
+// combining ones (Grapheme_Extend), wherever they stand.
 func rustDebug(s string) string {
 	var b strings.Builder
 	b.WriteByte('"')
@@ -64,7 +69,7 @@ func rustDebug(s string) string {
 		case 0:
 			b.WriteString(`\0`)
 		default:
-			if r == unicode.ReplacementChar && strings.HasPrefix(s[i:], "\xef\xbf\xbd") || unicode.IsPrint(r) && !(i == 0 && unicode.Is(unicode.Mn, r)) {
+			if r == unicode.ReplacementChar && strings.HasPrefix(s[i:], "\xef\xbf\xbd") || unicode.IsPrint(r) && !unicode.In(r, unicode.Mn, unicode.Me, unicode.Other_Grapheme_Extend) {
 				b.WriteRune(r)
 			} else {
 				b.WriteString(`\u{` + strconv.FormatInt(int64(r), 16) + `}`)
