@@ -141,9 +141,6 @@ func readBoundedUntilStopped(f *os.File, limit int, stop *atomic.Bool) ([]byte, 
 			}
 		}
 		if err == nil {
-			if stop.Load() {
-				f.SetReadDeadline(time.Now().Add(10 * time.Millisecond))
-			}
 			continue
 		}
 		if errors.Is(err, io.EOF) {
