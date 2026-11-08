@@ -1,0 +1,14 @@
+workspace_root: null
+scan_roots: null
+sync_remote_template: null
+origin_remote_templates: null
+local_sync_files: null
+trusted_wip_devices: null
+visibility_overrides: null
+private_remote_patterns: null
+public_export_remotes: null
+ignore_profiles: null
+require_identity: null
+identity_profiles: null
+require_checks: null
+check_profiles: null

@@ -1,4 +1,7 @@
 /target/
+/gitdcy
+/gitdcy.exe
+/gitdcy-darwin-arm64
 /.idea/
 /.vscode/
 .gitdcy.local.toml

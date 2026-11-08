@@ -2,9 +2,8 @@
 
 Private Git-only multi-device workspace client.
 
-GitDCY is written in Rust. It keeps source repos native on each device while
-avoiding manual `git fetch` and `git pull` across many projects. It is
-intentionally strict:
+GitDCY keeps source repos native on each device while avoiding manual
+`git fetch` and `git pull` across many projects. It is intentionally strict:
 
 - Git is the sync layer.
 - Ignored files are ignored unless explicitly allowlisted for private WIP sync.
@@ -12,18 +11,41 @@ intentionally strict:
 - Dirty work can be moved through private WIP refs on a `sync` remote.
 - No auto-merge, auto-rebase, or force-push.
 
+The command line, `gitdcy`, is written in Go with nothing but Go's standard
+library: no third-party modules (`go list -m all` lists only GitDCY itself).
+Until 2026-11-08 it was Rust; that version and the desktop GUI (egui, which
+still uses the Rust core) are kept in `rust/`.
+
 ## Run From Source
 
-GitDCY needs Rust, Cargo, and Git on every device.
+The command line needs Go (1.24 or newer) and Git on every device:
+
+```bash
+git clone https://github.com/<owner>/gitdcy.git
+cd gitdcy
+go run . doctor
+```
+
+Put it on `PATH` with one static build (no C compiler needed):
+
+```bash
+CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o ~/.local/bin/gitdcy .
+gitdcy doctor
+```
+
+On Windows (PowerShell) the same is
+`$env:CGO_ENABLED=0; go build -trimpath -ldflags='-s -w' -o $HOME\.local\bin\gitdcy.exe .`,
+or `go install -trimpath .`, which puts `gitdcy.exe` in `%USERPROFILE%\go\bin`.
+Run the same command again after pulling updates.
+
+The GUI is Rust (egui) and needs Rust, Cargo and Git:
 
 ### macOS
 
 ```bash
 xcode-select --install
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-git clone https://github.com/<owner>/gitdcy.git
-cd gitdcy
-cargo run --manifest-path crates/gitdcy-gui/Cargo.toml
+cargo run --manifest-path rust/crates/gitdcy-gui/Cargo.toml
 ```
 
 ### Windows 11
@@ -33,9 +55,7 @@ install Visual Studio Build Tools with the C++ desktop workload.
 
 ```powershell
 winget install Git.Git Rustlang.Rustup
-git clone https://github.com/<owner>/gitdcy.git
-cd gitdcy
-cargo run --manifest-path crates/gitdcy-gui/Cargo.toml
+cargo run --manifest-path rust/crates/gitdcy-gui/Cargo.toml
 ```
 
 ### Linux Mint / Ubuntu
@@ -44,26 +64,24 @@ cargo run --manifest-path crates/gitdcy-gui/Cargo.toml
 sudo apt update
 sudo apt install -y build-essential git pkg-config libx11-dev libxcb1-dev libxkbcommon-dev libwayland-dev libxrandr-dev libxi-dev libgl1-mesa-dev
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-git clone https://github.com/<owner>/gitdcy.git
-cd gitdcy
-cargo run --manifest-path crates/gitdcy-gui/Cargo.toml
+cargo run --manifest-path rust/crates/gitdcy-gui/Cargo.toml
 ```
 
 Useful CLI checks:
 
 ```bash
-cargo run -p gitdcy-cli -- doctor
-cargo run -p gitdcy-cli -- status
-cargo run -p gitdcy-cli -- status --format json
-cargo run -p gitdcy-cli -- dashboard
-cargo run -p gitdcy-cli -- audit --all
-cargo run -p gitdcy-cli -- policy status --all
-cargo run -p gitdcy-cli -- identity status --all
-cargo run -p gitdcy-cli -- check --all
-cargo run -p gitdcy-cli -- rules
-cargo run -p gitdcy-cli -- checkouts
-cargo run -p gitdcy-cli -- relate main origin/main
-cargo run -p gitdcy-cli -- sync --all
+gitdcy doctor
+gitdcy status
+gitdcy status --format json
+gitdcy dashboard
+gitdcy audit --all
+gitdcy policy status --all
+gitdcy identity status --all
+gitdcy check --all
+gitdcy rules
+gitdcy checkouts
+gitdcy relate main origin/main
+gitdcy sync --all
 ```
 
 `status --format json` is a read-only integration surface. It emits the
@@ -106,17 +124,6 @@ Unattended mutation also requires safety snapshots to exclude
 ignored/private-file payloads; `.env`, `.gitpriv/`, and similar data must use a
 separate encrypted private-file contract rather than Git WIP refs.
 
-To put the CLI on `PATH` from this checkout, install the CLI crate rather than
-the virtual workspace root:
-
-```bash
-cargo install --locked --path crates/gitdcy-cli
-gitdcy doctor
-```
-
-Run the same install command again after pulling CLI updates. Remove it with
-`cargo uninstall gitdcy-cli`.
-
 The default workspace root is `~/Code`. On first run, if no manifest exists, the
 app scans configured roots and also looks for `~/Documents/github`,
 `~/Documents/forgejo`, and `~/Documents/gitlab` when those folders exist.
@@ -148,8 +155,8 @@ Device For All Repos** to approve that device once across the workspace, or
 equivalents are:
 
 ```bash
-cargo run -p gitdcy-cli -- trust-device <device> --all
-cargo run -p gitdcy-cli -- trust-device <device> --repo <repo>
+gitdcy trust-device <device> --all
+gitdcy trust-device <device> --repo <repo>
 ```
 
 This approval is a local safety guard, not cryptographic MFA. The security
@@ -177,7 +184,7 @@ repos need a private `sync` remote for this. Forgejo repos can use their Forgejo
 For terminal-first work, run:
 
 ```bash
-cargo run -p gitdcy-cli -- dashboard
+gitdcy dashboard
 ```
 
 The TUI dashboard is read-focused by default: it shows all repos, dirty state,
@@ -591,7 +598,7 @@ cp .gitdcy.local.example.toml .gitdcy.local.toml
 The CLI equivalent for setting one repo's private sync remote is:
 
 ```bash
-cargo run -p gitdcy-cli -- set-sync-remote <repo> ssh://git@example.internal/owner/<repo>.git
+gitdcy set-sync-remote <repo> ssh://git@example.internal/owner/<repo>.git
 ```
 
 Provider-folder repos can also get default `origin` URLs from local ignored
@@ -599,7 +606,7 @@ templates. For example, a repo under `~/Code/github/my-app` can suggest
 `https://github.com/YOUR_GITHUB_USERNAME/my-app.git`.
 
 ```bash
-cargo run -p gitdcy-cli -- set-origin-remote my-app
+gitdcy set-origin-remote my-app
 ```
 
 Ignored local files such as `.env` are not included by default. To move one
@@ -628,14 +635,14 @@ targets are treated cautiously unless overridden in local config.
 Run a workspace audit:
 
 ```bash
-cargo run -p gitdcy-cli -- audit --all
-cargo run -p gitdcy-cli -- audit --all --explain
+gitdcy audit --all
+gitdcy audit --all --explain
 ```
 
 Install GitDCY's conservative global ignore block:
 
 ```bash
-cargo run -p gitdcy-cli -- install-ignore --global
+gitdcy install-ignore --global
 ```
 
 Use local-only visibility overrides for unusual remotes:
@@ -652,24 +659,30 @@ public_export_remotes = ["public"]
 Check and apply repo policy drift:
 
 ```bash
-cargo run -p gitdcy-cli -- policy status --all
-cargo run -p gitdcy-cli -- policy plan <repo>
-cargo run -p gitdcy-cli -- policy apply <repo>
+gitdcy policy status --all
+gitdcy policy plan <repo>
+gitdcy policy apply <repo>
 ```
 
 ## Build Binaries
 
 ```bash
-cargo build --release --workspace
-cargo build --release --manifest-path crates/gitdcy-gui/Cargo.toml
+CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o gitdcy .
+GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o gitdcy-darwin-arm64 .
+GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o gitdcy.exe .
+cargo build --release --manifest-path rust/crates/gitdcy-gui/Cargo.toml
 ```
 
-The GUI is its own Cargo workspace with its own `Cargo.lock`, so the root
-lock lists only what the CLI is built from.
+The Go build cross-compiles to every platform from any one of them. `go test
+./...` runs the command line's tests; they give themselves a home folder of
+their own, so they never read or change this machine's settings.
+
+The Rust workspace in `rust/` (the old CLI and its core, `rust/Cargo.toml`,
+with its own lock) still builds and tests (`cargo test --locked` in `rust/`):
+the GUI uses that core, and the old CLI stays for comparison and rollback. The
+GUI is its own Cargo workspace with its own `Cargo.lock`.
 
 Binary paths:
 
-- macOS/Linux GUI: `crates/gitdcy-gui/target/release/gitdcy-gui`
-- macOS/Linux CLI: `target/release/gitdcy`
-- Windows GUI: `crates\gitdcy-gui\target\release\gitdcy-gui.exe`
-- Windows CLI: `target\release\gitdcy.exe`
+- GUI: `rust/crates/gitdcy-gui/target/release/gitdcy-gui` (`.exe` on Windows)
+- CLI: `gitdcy` (`gitdcy.exe` on Windows), where `-o` put it
