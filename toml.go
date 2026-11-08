@@ -223,7 +223,7 @@ func (r *tomlReader) endOfLine() error {
 		r.advance(2)
 		return nil
 	}
-	return r.errHere("expected newline, `#`")
+	return r.errHere("unexpected key or value, expected newline, `#`")
 }
 
 // skipBlank skips spaces, comments and line ends (inside arrays).
@@ -818,8 +818,10 @@ func (r *tomlReader) multiLiteralString() (string, error) {
 func (r *tomlReader) array() ([]*tomlNode, error) {
 	line, col := r.line, r.col
 	r.advance(1)
+	_, _ = line, col
 	items := []*tomlNode{}
 	for {
+		endLine, endCol := r.line, r.col
 		if err := r.skipBlank(); err != nil {
 			return nil, err
 		}
@@ -828,24 +830,27 @@ func (r *tomlReader) array() ([]*tomlNode, error) {
 			return items, nil
 		}
 		if r.done() {
-			return nil, r.errAt(line, col, 1, "unclosed array, expected `]`")
+			return nil, r.errAt(endLine, endCol, 1, "unclosed array, expected `]`")
 		}
 		v, err := r.value()
 		if err != nil {
 			return nil, err
 		}
 		items = append(items, v)
+		endLine, endCol = r.line, r.col
 		if err := r.skipBlank(); err != nil {
 			return nil, err
 		}
-		switch r.peek() {
-		case ',':
+		switch {
+		case r.peek() == ',':
 			r.advance(1)
-		case ']':
+		case r.peek() == ']':
 			r.advance(1)
 			return items, nil
+		case r.done():
+			return nil, r.errAt(endLine, endCol, 1, "unclosed array, expected `]`")
 		default:
-			return nil, r.errHere("expected `,`, `]`")
+			return nil, r.errHere("missing comma between array elements, expected `,`")
 		}
 	}
 }
@@ -855,6 +860,7 @@ func (r *tomlReader) inlineTable(line, col int) (*tomlTable, error) {
 	r.advance(1)
 	t := newTomlTable(line, col)
 	for {
+		endLine, endCol := r.line, r.col
 		if err := r.skipBlank(); err != nil {
 			return nil, err
 		}
@@ -863,23 +869,36 @@ func (r *tomlReader) inlineTable(line, col int) (*tomlTable, error) {
 			break
 		}
 		if r.done() {
-			return nil, r.errAt(line, col, 1, "unclosed inline table, expected `}`")
+			return nil, r.errAt(endLine, endCol, 1, "unclosed inline table, expected `}`")
 		}
 		if err := r.keyValue(t); err != nil {
 			return nil, err
 		}
+		endLine, endCol = r.line, r.col
 		if err := r.skipBlank(); err != nil {
 			return nil, err
 		}
-		switch r.peek() {
-		case ',':
+		switch {
+		case r.peek() == ',':
 			r.advance(1)
-		case '}':
+		case r.peek() == '}':
 			r.advance(1)
 			sealInline(t)
 			return t, nil
+		case r.done():
+			return nil, r.errAt(endLine, endCol, 1, "unclosed inline table, expected `}`")
 		default:
-			return nil, r.errHere("expected `,`, `}`")
+			// Point where the toml crate did: at the `=` of the key-value
+			// pair that follows without a comma.
+			line, col, at := r.line, r.col, r.at
+			if _, err := r.key(); err == nil {
+				r.skipSpace()
+				if r.peek() == '=' {
+					line, col = r.line, r.col
+				}
+			}
+			r.at = at
+			return nil, r.errAt(line, col, 1, "extra assignment between key-value pairs, expected `,`")
 		}
 	}
 	sealInline(t)
@@ -1005,7 +1024,11 @@ func plainValue(n *tomlNode) any {
 	return m
 }
 
-func (r *tomlReader) decode(n *tomlNode, v reflect.Value) error {
+func (r *tomlReader) decode(n *tomlNode, v reflect.Value) error { return r.decodeAs(n, v, false) }
+
+// decodeAs reads a value; path marks a Rust PathBuf (`toml:",path"`), which
+// serde named "path string" in its errors.
+func (r *tomlReader) decodeAs(n *tomlNode, v reflect.Value, path bool) error {
 	if v.CanAddr() {
 		if d, ok := v.Addr().Interface().(tomlValueDecoder); ok {
 			if err := d.decodeTOML(plainValue(n)); err != nil {
@@ -1016,7 +1039,7 @@ func (r *tomlReader) decode(n *tomlNode, v reflect.Value) error {
 	}
 	if v.Kind() == reflect.Pointer {
 		elem := reflect.New(v.Type().Elem())
-		if err := r.decode(n, elem.Elem()); err != nil {
+		if err := r.decodeAs(n, elem.Elem(), path); err != nil {
 			return err
 		}
 		v.Set(elem)
@@ -1037,6 +1060,9 @@ func (r *tomlReader) decode(n *tomlNode, v reflect.Value) error {
 	switch v.Kind() {
 	case reflect.String:
 		if n.kind != tomlString {
+			if path {
+				return r.typeError(n, "path string")
+			}
 			return r.typeError(n, expectedText(v.Type()))
 		}
 		v.SetString(n.str)
@@ -1073,7 +1099,7 @@ func (r *tomlReader) decode(n *tomlNode, v reflect.Value) error {
 		}
 		list := reflect.MakeSlice(v.Type(), len(n.items), len(n.items))
 		for i, item := range n.items {
-			if err := r.decode(item, list.Index(i)); err != nil {
+			if err := r.decodeAs(item, list.Index(i), path); err != nil {
 				return err
 			}
 		}
@@ -1143,7 +1169,7 @@ func (r *tomlReader) decodeTable(n *tomlNode, v reflect.Value, root bool) error 
 			}
 			continue
 		}
-		if err := r.decode(n.table.vals[k], v.Field(i)); err != nil {
+		if err := r.decodeAs(n.table.vals[k], v.Field(i), strings.Contains(t.Field(i).Tag.Get("toml"), "path")); err != nil {
 			return err
 		}
 	}
