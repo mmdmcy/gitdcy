@@ -58,7 +58,7 @@ pub(crate) fn command() -> clap::Command {
   gitdcy rules scan ~/code/app --since 2026-10-24
 
 The rules file is the one given with --rules, else rules_file in GitDCY's
-local.yaml, else rules.toml in GitDCY's config folder. With a [hygiene] table
+local.toml, else rules.toml in GitDCY's config folder. With a [hygiene] table
 in it, scan and check also remind of work left lying around: a dirty tree or a
 pull not done, commits on no remote from before today, a branch not merged
 after branch_days (3), and open pull requests (GitHub's, through gh).",

@@ -92,11 +92,21 @@ impl Sandbox {
         fs::create_dir_all(rules.parent().unwrap()).unwrap();
         fs::write(&rules, text).unwrap();
         fs::write(
-            self.root.join("home/.config/gitdcy/local.yaml"),
-            format!("rules_file: {}\n", rules.display()),
+            self.root.join("home/.config/gitdcy/local.toml"),
+            format!("rules_file = \"{}\"\n", rules.display()),
         )
         .unwrap();
         rules
+    }
+
+    /// The names in GitDCY's config folder, sorted.
+    fn config_files(&self) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(self.root.join("home/.config/gitdcy"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
     }
 
     /// A working repository with one commit and a bare `origin` next to it.
@@ -528,21 +538,160 @@ fn a_rule_is_found_by_its_remote_when_the_first_commit_is_not_known() {
 }
 
 #[test]
-fn a_local_yaml_in_the_repository_cannot_move_the_rules_file() {
+fn a_local_settings_file_in_the_repository_cannot_move_the_rules_file() {
     let s = Sandbox::new("cwdconfig");
     let (work, first) = s.repo("app");
     s.rules(&rule(&first, "\"nowhere\"", ""));
     let empty = s.root.join("empty.toml");
     fs::write(&empty, "").unwrap();
+    for (name, setting) in [
+        (
+            ".gitdcy.local.toml",
+            format!("rules_file = \"{}\"\n", empty.display()),
+        ),
+        (
+            ".gitdcy.local.yaml",
+            format!("rules_file: {}\n", empty.display()),
+        ),
+    ] {
+        fs::write(work.join(name), setting).unwrap();
+        let out = s.gitdcy(&work, &["rules", "check", "--format", "json"]);
+        let value = json(&out);
+        assert_eq!(
+            value["data"]["rule"],
+            "example-app",
+            "{name}: {}",
+            text(&out)
+        );
+        assert_eq!(value["data"]["refused"], true, "{name}");
+        fs::remove_file(work.join(name)).unwrap();
+    }
+}
+
+/// The YAML settings of a build before 2026-11-08, met by this one.
+#[test]
+fn a_yaml_settings_file_becomes_toml_and_keeps_a_copy() {
+    let s = Sandbox::new("migrate");
+    let (work, first) = s.repo("app");
+    let rules = s.rules(&rule(&first, "\"nowhere\"", ""));
+    let config = s.root.join("home/.config/gitdcy");
+    fs::remove_file(config.join("local.toml")).unwrap();
+    let yaml = format!("# where the rules are\nrules_file: {}\n", rules.display());
+    fs::write(config.join("local.yaml"), &yaml).unwrap();
+
+    // Read only: read as YAML, nothing written.
+    let out = s
+        .command(GITDCY, &work)
+        .env("GITDCY_READ_ONLY_STATUS", "1")
+        .args(["rules", "--format", "json"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        json(&out)["data"]["rule"]["name"],
+        "example-app",
+        "{}",
+        text(&out)
+    );
+    assert_eq!(s.config_files(), ["local.yaml"]);
+
+    let out = s.gitdcy(&work, &["rules", "--format", "json"]);
+    assert_eq!(
+        json(&out)["data"]["rule"]["name"],
+        "example-app",
+        "{}",
+        text(&out)
+    );
+    let files = s.config_files();
+    assert_eq!(files.len(), 2, "{files:?}");
+    assert_eq!(files[0], "local.toml");
+    assert!(files[1].starts_with("local.yaml.bak-"), "{files:?}");
+    assert_eq!(fs::read_to_string(config.join(&files[1])).unwrap(), yaml);
+    assert_eq!(
+        fs::read_to_string(config.join("local.toml")).unwrap(),
+        format!("rules_file = \"{}\"\n", rules.display())
+    );
+    // And it keeps working from the TOML.
+    let out = s.gitdcy(&work, &["rules", "check", "--format", "json"]);
+    assert_eq!(json(&out)["data"]["refused"], true, "{}", text(&out));
+}
+
+#[test]
+fn yaml_that_would_lose_something_or_cannot_be_read_stays_as_it_is() {
+    let s = Sandbox::new("migrate-not");
+    let (work, first) = s.repo("app");
+    let rules = s.rules(&rule(&first, "\"nowhere\"", ""));
+    let config = s.root.join("home/.config/gitdcy");
+    fs::remove_file(config.join("local.toml")).unwrap();
+
+    // A key that is no setting: still read, not converted, and doctor says why.
+    let yaml = format!("rules_file: {}\ncolour: blue\n", rules.display());
+    fs::write(config.join("local.yaml"), &yaml).unwrap();
+    let out = s.gitdcy(&work, &["rules", "--format", "json"]);
+    assert_eq!(
+        json(&out)["data"]["rule"]["name"],
+        "example-app",
+        "{}",
+        text(&out)
+    );
+    assert_eq!(s.config_files(), ["local.yaml"]);
+    let out = s.gitdcy(&work, &["doctor"]);
+    assert!(
+        text(&out).contains(
+            "local.yaml is read as YAML, not converted to TOML: colour is not a GitDCY setting"
+        ),
+        "{}",
+        text(&out)
+    );
+
+    // YAML this build does not read: refused (the push check fails closed),
+    // the file untouched.
+    let yaml = format!("base: &r {}\nrules_file: *r\n", rules.display());
+    fs::write(config.join("local.yaml"), &yaml).unwrap();
+    let out = s.gitdcy(&work, &["rules", "check", "--format", "json"]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out));
+    assert!(text(&out).contains("an anchor"), "{}", text(&out));
+    assert_eq!(s.config_files(), ["local.yaml"]);
+    assert_eq!(fs::read_to_string(config.join("local.yaml")).unwrap(), yaml);
+}
+
+#[test]
+fn a_checkout_s_yaml_is_converted_only_where_git_ignores_the_result() {
+    let s = Sandbox::new("migrate-checkout");
+    let (work, first) = s.repo("app");
+    s.rules(&rule(&first, "\"nowhere\"", ""));
+    fs::write(work.join(".gitdcy.local.yaml"), "workspace_root: ~/Code\n").unwrap();
+    s.ok(&work, &["add", ".gitdcy.local.yaml"]);
+    s.ok(&work, &["commit", "-q", "-m", "local settings, tracked"]);
+    // Its settings are read where GitDCY looks at repositories (status).
+    s.gitdcy(&work, &["status", "--format", "json"]);
+    // Tracked, and nothing ignores the new names: left as it is.
+    assert!(work.join(".gitdcy.local.yaml").exists());
+    assert!(!work.join(".gitdcy.local.toml").exists());
+    assert_eq!(s.ok(&work, &["status", "--porcelain"]), "");
+    // Tracked, even with the new names ignored: still left.
     fs::write(
-        work.join(".gitdcy.local.yaml"),
-        format!("rules_file: {}\n", empty.display()),
+        work.join(".git/info/exclude"),
+        ".gitdcy.local.toml\n.gitdcy.local.yaml.bak-*\n",
     )
     .unwrap();
-    let out = s.gitdcy(&work, &["rules", "check", "--format", "json"]);
-    let value = json(&out);
-    assert_eq!(value["data"]["rule"], "example-app", "{}", text(&out));
-    assert_eq!(value["data"]["refused"], true);
+    s.gitdcy(&work, &["status", "--format", "json"]);
+    assert!(work.join(".gitdcy.local.yaml").exists());
+    assert_eq!(s.ok(&work, &["status", "--porcelain"]), "");
+
+    s.ok(&work, &["rm", "-q", "--cached", ".gitdcy.local.yaml"]);
+    s.ok(&work, &["commit", "-q", "-m", "untracked again"]);
+    fs::write(
+        work.join(".git/info/exclude"),
+        ".gitdcy.local.yaml\n.gitdcy.local.toml\n.gitdcy.local.yaml.bak-*\n",
+    )
+    .unwrap();
+    s.gitdcy(&work, &["status", "--format", "json"]);
+    assert!(!work.join(".gitdcy.local.yaml").exists());
+    assert_eq!(
+        fs::read_to_string(work.join(".gitdcy.local.toml")).unwrap(),
+        "workspace_root = \"~/Code\"\n"
+    );
+    assert_eq!(s.ok(&work, &["status", "--porcelain"]), "");
 }
 
 #[test]

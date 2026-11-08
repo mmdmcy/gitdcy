@@ -45,7 +45,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// The rules file's name in GitDCY's config folder, when `local.yaml` names no other.
+/// The rules file's name in GitDCY's config folder, when `local.toml` names no other.
 pub const RULES_FILE_NAME: &str = "rules.toml";
 /// One repository's rule, copied into its git folder by `install`.
 pub const RULES_COPY_NAME: &str = "gitdcy-rules.toml";
@@ -223,7 +223,7 @@ pub fn read_rules(path: &Path) -> Result<Option<RulesFile>> {
 }
 
 /// The rules file: the one given, else `rules_file` in this device's own
-/// `local.yaml`, else `rules.toml` in GitDCY's config folder. The setting is
+/// `local.toml`, else `rules.toml` in GitDCY's config folder. The setting is
 /// read from the device's config only, never from a file in the current
 /// folder: a repository could carry one.
 pub fn rules_file_path(explicit: Option<&Path>) -> Result<PathBuf> {
@@ -785,7 +785,7 @@ pub fn rules_report(
                 found.rules_path.display()
             ),
             _ => format!(
-                "no rules file at {} (rules_file in GitDCY's local.yaml names another place)",
+                "no rules file at {} (rules_file in GitDCY's local.toml names another place)",
                 found.rules_path.display()
             ),
         });
@@ -906,7 +906,7 @@ pub struct InstallReport {
 }
 
 /// `YYYY-MM-DD` in UTC.
-fn today() -> String {
+pub(crate) fn today() -> String {
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -929,7 +929,7 @@ fn civil_date(days: i64) -> String {
 }
 
 /// Moves `path` aside as `NAME.bak-YYYY-MM-DD` (`-2`, `-3`, ... when taken).
-fn keep_aside(path: &Path) -> Result<PathBuf> {
+pub(crate) fn keep_aside(path: &Path) -> Result<PathBuf> {
     let name = path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
