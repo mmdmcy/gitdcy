@@ -935,6 +935,18 @@ func describeNode(n *tomlNode) string {
 	return "map"
 }
 
+// serdeOneOf is serde's list of the words a name may be: "`a`", "`a` or
+// `b`", else "one of `a`, `b`, `c`".
+func serdeOneOf(names []string) string {
+	switch len(names) {
+	case 1:
+		return "`" + names[0] + "`"
+	case 2:
+		return "`" + names[0] + "` or `" + names[1] + "`"
+	}
+	return "one of `" + strings.Join(names, "`, `") + "`"
+}
+
 // expectedText is how serde named what a Go type takes.
 func expectedText(t reflect.Type) string {
 	if t.Kind() == reflect.Pointer {
@@ -1014,11 +1026,7 @@ func (r *tomlReader) decode(n *tomlNode, v reflect.Value) error {
 				return nil
 			}
 		}
-		quoted := make([]string, 0)
-		for _, variant := range e.enumVariants() {
-			quoted = append(quoted, "`"+variant+"`")
-		}
-		return r.errAt(n.line, n.col, n.span, "unknown variant `%s`, expected one of %s", n.str, strings.Join(quoted, ", "))
+		return r.errAt(n.line, n.col, n.span, "unknown variant `%s`, expected %s", n.str, serdeOneOf(e.enumVariants()))
 	}
 	switch v.Kind() {
 	case reflect.String:
