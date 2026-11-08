@@ -196,7 +196,7 @@ const (
 type GitIdentityProfile struct {
 	Name           string     `json:"name"`
 	Email          string     `json:"email"`
-	PathPrefixes   []string   `json:"path_prefixes"`
+	PathPrefixes   []string   `json:"path_prefixes" toml:",path"`
 	RemotePatterns []string   `json:"remote_patterns"`
 	Providers      []Provider `json:"providers"`
 }
@@ -310,7 +310,7 @@ func displayCommandArg(value string) string {
 
 // CheckProfile is the checks for the repositories its selectors match.
 type CheckProfile struct {
-	PathPrefixes         []string       `json:"path_prefixes"`
+	PathPrefixes         []string       `json:"path_prefixes" toml:",path"`
 	RemotePatterns       []string       `json:"remote_patterns"`
 	Providers            []Provider     `json:"providers"`
 	Checks               []CheckCommand `json:"checks"`
@@ -349,14 +349,14 @@ func (r RepoCheckReport) stateLabel() string { return string(r.State) }
 // WorkspaceManifest is the workspace: its root and its repositories
 // (workspace.toml).
 type WorkspaceManifest struct {
-	WorkspaceRoot string      `json:"workspace_root" toml:",required"`
+	WorkspaceRoot string      `json:"workspace_root" toml:",required,path"`
 	Repos         []RepoEntry `json:"repos" toml:",required"`
 }
 
 // RepoEntry is one repository of the workspace.
 type RepoEntry struct {
 	ID             string   `json:"id" toml:",required"`
-	Path           string   `json:"path" toml:",required"`
+	Path           string   `json:"path" toml:",required,path"`
 	Provider       Provider `json:"provider" toml:",required"`
 	Enabled        bool     `json:"enabled" toml:",required"`
 	PrimaryRemote  *string  `json:"primary_remote"`
@@ -367,8 +367,8 @@ type RepoEntry struct {
 // LocalConfig is this device's settings (local.toml, merged with the
 // current folder's .gitdcy.local.toml). A nil field is not set.
 type LocalConfig struct {
-	WorkspaceRoot         *string                        `json:"workspace_root"`
-	ScanRoots             *[]string                      `json:"scan_roots"`
+	WorkspaceRoot         *string                        `json:"workspace_root" toml:",path"`
+	ScanRoots             *[]string                      `json:"scan_roots" toml:",path"`
 	SyncRemoteTemplate    *string                        `json:"sync_remote_template"`
 	OriginRemoteTemplates *map[string]string             `json:"origin_remote_templates"`
 	LocalSyncFiles        *map[string][]string           `json:"local_sync_files"`
@@ -383,7 +383,7 @@ type LocalConfig struct {
 	CheckProfiles         *map[string]CheckProfile       `json:"check_profiles"`
 	// The repository rules file (`gitdcy rules`); read from this device's
 	// own config only, never from a .gitdcy.local.toml in the current folder.
-	RulesFile *string `json:"rules_file,omitempty"`
+	RulesFile *string `json:"rules_file,omitempty" toml:",path"`
 	// Set when a settings file could not be read: GitDCY then fails closed.
 	ConfigError *string `json:"-"`
 }
