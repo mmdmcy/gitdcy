@@ -1,0 +1,52 @@
+workspace_root: ~/Code
+scan_roots:
+- /home/u/Documents/github
+- ' lead'
+sync_remote_template: ssh://git@example.internal/o/{repo}.git
+origin_remote_templates:
+  github: 'true'
+  gitlab: 'a: b # c'
+local_sync_files:
+  github/app:
+  - .env
+  - -D
+trusted_wip_devices:
+  '*':
+  - laptop
+  - '123'
+visibility_overrides:
+  github/private: private
+private_remote_patterns: []
+public_export_remotes:
+- '~'
+- '''q'''
+- "é\t\a"
+ignore_profiles: {}
+require_identity: true
+identity_profiles:
+  main:
+    name: A "B"
+    email: a@b.c
+    path_prefixes:
+    - ~/x
+    remote_patterns: []
+    providers:
+    - forgejo
+require_checks: null
+check_profiles:
+  rust:
+    path_prefixes: []
+    remote_patterns:
+    - github.com/o/a
+    providers: []
+    checks:
+    - name: clippy
+      program: cargo
+      args:
+      - --
+      - -D
+      - warnings
+      timeout_seconds: 900
+    run_before_push: false
+    require_clean_worktree: true
+rules_file: /home/u/fleet/repos.toml
