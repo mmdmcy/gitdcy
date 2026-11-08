@@ -66,6 +66,9 @@ type tomlNode struct {
 	// An integer too large for 64 bits: kept so an unknown key may hold
 	// one, refused when a setting takes it.
 	overflow bool
+	// Where the key of a `key = value` was written (an unknown key is
+	// shown there); 0 when the node's own place is its key's.
+	keyLine, keyCol, keySpan int
 }
 
 // tomlTable is a table: its keys in the order written.
@@ -78,6 +81,7 @@ type tomlTable struct {
 	inline   bool // an inline table: closed
 	line     int
 	col      int
+	span     int // its [header]'s width, when a header defines it
 }
 
 func newTomlTable(line, col int) *tomlTable {
@@ -348,6 +352,7 @@ func (r *tomlReader) header(root *tomlTable) (*tomlTable, error) {
 		}
 		r.advance(1)
 	}
+	span := r.col - col
 	t := root
 	for _, k := range keys[:len(keys)-1] {
 		next, err := r.descend(t, k)
@@ -361,7 +366,7 @@ func (r *tomlReader) header(root *tomlTable) (*tomlTable, error) {
 	if array {
 		if !ok {
 			table := newTomlTable(line, col)
-			table.defined = true
+			table.defined, table.span = true, span
 			t.set(last.name, &tomlNode{kind: tomlArray, items: []*tomlNode{{kind: tomlTableKind, table: table, line: line, col: col}}, tableArray: true, line: last.line, col: last.col, span: last.span})
 			return table, nil
 		}
@@ -369,19 +374,19 @@ func (r *tomlReader) header(root *tomlTable) (*tomlTable, error) {
 			return nil, r.errAt(last.line, last.col, last.span, "duplicate key `%s`", last.name)
 		}
 		table := newTomlTable(line, col)
-		table.defined = true
+		table.defined, table.span = true, span
 		existing.items = append(existing.items, &tomlNode{kind: tomlTableKind, table: table, line: line, col: col})
 		return table, nil
 	}
 	if !ok {
 		table := newTomlTable(line, col)
-		table.defined = true
+		table.defined, table.span = true, span
 		t.set(last.name, &tomlNode{kind: tomlTableKind, table: table, line: last.line, col: last.col, span: last.span})
 		return table, nil
 	}
 	if existing.kind == tomlTableKind && existing.table.implicit && !existing.table.defined && !existing.table.dotted && !existing.table.inline {
 		existing.table.defined = true
-		existing.table.line, existing.table.col = line, col
+		existing.table.line, existing.table.col, existing.table.span = line, col, span
 		return existing.table, nil
 	}
 	return nil, r.errAt(last.line, last.col, last.span, "duplicate key `%s`", last.name)
@@ -439,6 +444,7 @@ func (r *tomlReader) keyValue(t *tomlTable) error {
 	if _, ok := t.vals[last.name]; ok {
 		return r.errAt(last.line, last.col, last.span, "duplicate key `%s`", last.name)
 	}
+	value.keyLine, value.keyCol, value.keySpan = last.line, last.col, last.span
 	t.set(last.name, value)
 	return nil
 }
@@ -1119,16 +1125,21 @@ func (r *tomlReader) decodeTable(n *tomlNode, v reflect.Value, root bool) error 
 		}
 	}
 	_, deny := v.Addr().Interface().(tomlDenyUnknown)
-	for _, k := range n.table.keys {
+	// The toml crate gave serde a table's keys sorted (a BTreeMap), so the
+	// first problem reported is the one under the first key in that order.
+	for _, k := range sortedKeys(n.table.vals) {
 		i, ok := fields[k]
 		if !ok {
 			if deny {
-				quoted := make([]string, len(names))
-				for j, name := range names {
-					quoted[j] = "`" + name + "`"
-				}
 				kn := n.table.vals[k]
-				return r.errAt(kn.line, kn.col, kn.span, "unknown field `%s`, expected one of %s", k, strings.Join(quoted, ", "))
+				line, col, span := kn.line, kn.col, kn.span
+				if kn.keyLine > 0 {
+					line, col, span = kn.keyLine, kn.keyCol, kn.keySpan
+				}
+				if len(names) == 0 {
+					return r.errAt(line, col, span, "unknown field `%s`, there are no fields", k)
+				}
+				return r.errAt(line, col, span, "unknown field `%s`, expected %s", k, serdeOneOf(names))
 			}
 			continue
 		}
@@ -1140,11 +1151,15 @@ func (r *tomlReader) decodeTable(n *tomlNode, v reflect.Value, root bool) error 
 		f := t.Field(fields[name])
 		if strings.Contains(f.Tag.Get("toml"), "required") {
 			if _, ok := n.table.vals[name]; !ok {
-				line, col := n.table.line, n.table.col
-				if root {
-					line, col = 1, 1
+				// Shown under the table's [header], or the whole inline table.
+				line, col, span := n.table.line, n.table.col, n.table.span
+				if span == 0 && n.table.inline {
+					span = n.span
 				}
-				return r.errAt(line, col, 1, "missing field `%s`", name)
+				if root {
+					line, col, span = 1, 1, 1
+				}
+				return r.errAt(line, col, span, "missing field `%s`", name)
 			}
 		}
 	}
