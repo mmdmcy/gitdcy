@@ -301,6 +301,7 @@ fn parse(matches: &ArgMatches) -> Command {
 }
 
 fn main() -> Result<()> {
+    gitdcy_core::convert_yaml_settings();
     match parse(&cli().get_matches()) {
         Command::Doctor => doctor(),
         Command::Status { format } => status(format),
@@ -392,6 +393,9 @@ fn doctor() -> Result<()> {
     println!("workspace root: {}", manifest.workspace_root.display());
     println!("repos: {}", manifest.repos.len());
     println!("config: {}", gitdcy_core::manifest_path()?.display());
+    for note in gitdcy_core::config_notes() {
+        println!("config note: {note}");
+    }
     println!("device: {}", gitdcy_core::device_id());
     println!();
 

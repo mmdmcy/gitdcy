@@ -11,6 +11,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub mod carry;
 pub mod checkouts;
+mod config_file;
 pub mod error;
 pub mod facts;
 pub mod hygiene;
@@ -19,10 +20,7 @@ mod process;
 pub mod relate;
 pub mod rules;
 pub mod scan;
-#[cfg_attr(not(test), allow(dead_code))] // read from the next commit on
 mod yaml;
-#[cfg(test)]
-mod yaml_vs_norway;
 
 pub const APP_NAME: &str = "GitDCY";
 pub const SYNC_REMOTE: &str = "sync";
@@ -711,7 +709,7 @@ pub struct LocalConfig {
     pub require_checks: Option<bool>,
     pub check_profiles: Option<BTreeMap<String, CheckProfile>>,
     /// The repository rules file (`gitdcy rules`); read from this device's own
-    /// config only, never from a `.gitdcy.local.yaml` in the current folder.
+    /// config only, never from a `.gitdcy.local.toml` in the current folder.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rules_file: Option<PathBuf>,
     #[serde(skip)]
@@ -752,12 +750,31 @@ fn config_dir_from(
 }
 
 pub fn local_config_path() -> Result<PathBuf> {
-    Ok(config_dir()?.join("local.yaml"))
+    Ok(config_file::toml_path(&config_dir()?, LOCAL_CONFIG))
 }
 
 pub fn manifest_path() -> Result<PathBuf> {
-    Ok(config_dir()?.join("workspace.yaml"))
+    Ok(config_file::toml_path(&config_dir()?, MANIFEST))
 }
+
+static CONVERT_YAML: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Lets this process convert YAML settings files it reads to TOML. The
+/// programs call it first; a library user or a test that does not never
+/// writes to the settings it reads.
+pub fn convert_yaml_settings() {
+    CONVERT_YAML.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn may_convert() -> bool {
+    CONVERT_YAML.load(std::sync::atomic::Ordering::Relaxed) && !read_only_status()
+}
+
+/// The settings files, as `NAME.toml` (until 2026-11-08 `NAME.yaml`, which
+/// is still read and converted: config_file.rs).
+const LOCAL_CONFIG: &str = "local";
+const MANIFEST: &str = "workspace";
+const FOLDER_CONFIG: &str = ".gitdcy.local";
 
 pub fn default_workspace_root() -> PathBuf {
     if let Some(root) = load_local_config().workspace_root {
@@ -903,12 +920,17 @@ pub fn suggested_origin_remote(entry: &RepoEntry) -> Option<String> {
 }
 
 pub fn load_or_discover_manifest() -> Result<WorkspaceManifest> {
-    let path = manifest_path()?;
-    if path.exists() {
-        let text = fs::read_to_string(&path)
+    if let Some(found) = config_file::find(&config_dir()?, MANIFEST) {
+        let path = found.path();
+        let text = fs::read_to_string(path)
             .with_context(|| format!("read manifest {}", path.display()))?;
-        let manifest: WorkspaceManifest = serde_norway::from_str(&text)
+        let manifest: WorkspaceManifest = found
+            .parse(&text)
             .with_context(|| format!("parse manifest {}", path.display()))?;
+        if may_convert() {
+            // A file that does not convert stays YAML; doctor says why.
+            found.convert(&text, &manifest).ok();
+        }
         return Ok(manifest);
     }
 
@@ -924,13 +946,7 @@ pub fn load_or_discover_manifest() -> Result<WorkspaceManifest> {
 }
 
 pub fn save_manifest(manifest: &WorkspaceManifest) -> Result<()> {
-    let path = manifest_path()?;
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("create config directory {}", parent.display()))?;
-    }
-    let text = serde_norway::to_string(manifest)?;
-    fs::write(&path, text).with_context(|| format!("write manifest {}", path.display()))?;
+    config_file::write(&config_dir()?, MANIFEST, manifest).context("write manifest")?;
     Ok(())
 }
 
@@ -3700,36 +3716,64 @@ pub fn load_local_config() -> LocalConfig {
     if let Ok(current_dir) = env::current_dir() {
         config = merge_local_config(
             config,
-            read_local_config_file(&current_dir.join(".gitdcy.local.yaml")),
+            read_local_config_file(&current_dir, FOLDER_CONFIG, || {
+                may_convert() && git_ignores_converted(&current_dir)
+            }),
         );
     }
     config
 }
 
 fn load_saved_local_config() -> LocalConfig {
-    local_config_path()
+    config_dir()
         .ok()
-        .map(|path| read_local_config_file(&path))
+        .map(|dir| read_local_config_file(&dir, LOCAL_CONFIG, may_convert))
         .unwrap_or_default()
 }
 
 fn save_local_config(config: &LocalConfig) -> Result<PathBuf> {
-    let path = local_config_path()?;
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("create config directory {}", parent.display()))?;
+    // Writing an unreadable file's stand-in would replace the owner's settings.
+    if let Some(error) = &config.config_error {
+        bail!("{error}; fix it before GitDCY changes it");
     }
-    let text = serde_norway::to_string(config)?;
-    fs::write(&path, text).with_context(|| format!("write local config {}", path.display()))?;
-    Ok(path)
+    config_file::write(&config_dir()?, LOCAL_CONFIG, config).context("write local config")
 }
 
-fn read_local_config_file(path: &Path) -> LocalConfig {
+/// A folder's own settings file is converted from YAML only where git
+/// ignores the YAML (so it is not tracked) and what the conversion leaves
+/// (`.gitdcy.local.toml` and the kept YAML): it never puts settings in front
+/// of `git add` or takes a tracked file away.
+fn git_ignores_converted(folder: &Path) -> bool {
+    let names = [
+        format!("{FOLDER_CONFIG}.yaml"),
+        format!("{FOLDER_CONFIG}.toml"),
+        format!("{FOLDER_CONFIG}.yaml.bak-{}", rules::today()),
+    ];
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(folder)
+        .args(["check-ignore", "--"])
+        .args(&names)
+        .stderr(Stdio::null())
+        .output();
+    output.is_ok_and(|output| {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let ignored: Vec<&str> = stdout.lines().collect();
+        names.iter().all(|name| ignored.contains(&name.as_str()))
+    })
+}
+
+fn read_local_config_file(
+    folder: &Path,
+    name: &str,
+    may_convert: impl FnOnce() -> bool,
+) -> LocalConfig {
+    let Some(found) = config_file::find(folder, name) else {
+        return LocalConfig::default();
+    };
+    let path = found.path();
     let text = match fs::read_to_string(path) {
         Ok(text) => text,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return LocalConfig::default();
-        }
         Err(error) => {
             return invalid_local_config(format!(
                 "could not read GitDCY config {}: {error}",
@@ -3737,13 +3781,74 @@ fn read_local_config_file(path: &Path) -> LocalConfig {
             ));
         }
     };
-    match serde_norway::from_str::<LocalConfig>(&text) {
-        Ok(config) => config,
+    match found.parse::<LocalConfig>(&text) {
+        Ok(config) => {
+            if found.is_yaml() && may_convert() {
+                // A file that does not convert stays YAML; doctor says why.
+                found.convert(&text, &config).ok();
+            }
+            config
+        }
         Err(error) => invalid_local_config(format!(
             "could not parse GitDCY config {}: {error}",
             path.display()
         )),
     }
+}
+
+/// Settings files that are still YAML or stand beside their TOML, each with
+/// why: what `gitdcy doctor` lists after the config line.
+pub fn config_notes() -> Vec<String> {
+    let mut notes = Vec::new();
+    let Ok(dir) = config_dir() else {
+        return notes;
+    };
+    let here = env::current_dir().ok();
+    let mut places = vec![(dir.clone(), LOCAL_CONFIG), (dir, MANIFEST)];
+    if let Some(here) = &here {
+        places.push((here.clone(), FOLDER_CONFIG));
+    }
+    for (folder, name) in places {
+        let yaml = config_file::yaml_path(&folder, name);
+        if !yaml.exists() {
+            continue;
+        }
+        let toml = config_file::toml_path(&folder, name);
+        if toml.exists() {
+            notes.push(format!(
+                "{} is not read: {} is",
+                yaml.display(),
+                toml.display()
+            ));
+            continue;
+        }
+        let text = fs::read_to_string(&yaml).unwrap_or_default();
+        let problem = if name == MANIFEST {
+            yaml::from_str::<WorkspaceManifest>(&text)
+                .map(|value| config_file::problem(&text, &value))
+        } else {
+            yaml::from_str::<LocalConfig>(&text).map(|value| config_file::problem(&text, &value))
+        };
+        let why = match problem {
+            Err(error) => format!("cannot be read: {error}"),
+            Ok(Some(problem)) => format!("is read as YAML, not converted to TOML: {problem}"),
+            Ok(None) if !may_convert() => {
+                "is read as YAML, not converted while GITDCY_READ_ONLY_STATUS=1 (or by a \
+                 library user)"
+                    .to_string()
+            }
+            Ok(None) if name == FOLDER_CONFIG => format!(
+                "is read as YAML; it is converted once git ignores {FOLDER_CONFIG}.toml and \
+                 {FOLDER_CONFIG}.yaml.bak-* here"
+            ),
+            Ok(None) => format!(
+                "is read as YAML; converting it failed (can {} be written?)",
+                folder.display()
+            ),
+        };
+        notes.push(format!("{} {why}", yaml.display()));
+    }
+    notes
 }
 
 fn invalid_local_config(error: String) -> LocalConfig {
@@ -3817,7 +3922,7 @@ fn merge_local_config(mut base: LocalConfig, next: LocalConfig) -> LocalConfig {
             .get_or_insert_with(BTreeMap::new)
             .extend(next_checks);
     }
-    // `rules_file` is not taken from `next`: a `.gitdcy.local.yaml` in the
+    // `rules_file` is not taken from `next`: a `.gitdcy.local.toml` in the
     // current folder could come with a repository and point elsewhere.
     if next.config_error.is_some() {
         base.config_error = next.config_error;
@@ -4041,15 +4146,13 @@ mod tests {
     }
 
     #[test]
-    fn identity_profiles_deserialize_from_local_yaml() {
-        let config: LocalConfig = serde_norway::from_str(
-            r#"require_identity: true
-identity_profiles:
-  forgejo-selfhosted:
-    name: Forgejo User
-    email: forgejo@example.invalid
-    providers:
-      - forgejo
+    fn identity_profiles_deserialize_from_local_toml() {
+        let config: LocalConfig = toml::from_str(
+            r#"require_identity = true
+[identity_profiles.forgejo-selfhosted]
+name = "Forgejo User"
+email = "forgejo@example.invalid"
+providers = ["forgejo"]
 "#,
         )
         .unwrap();
@@ -4067,12 +4170,10 @@ identity_profiles:
 
     #[test]
     fn incomplete_identity_profile_is_invalid_and_fail_closed() {
-        let config: LocalConfig = serde_norway::from_str(
-            r#"require_identity: true
-identity_profiles:
-  incomplete:
-    providers:
-      - forgejo
+        let config: LocalConfig = toml::from_str(
+            r#"require_identity = true
+[identity_profiles.incomplete]
+providers = ["forgejo"]
 "#,
         )
         .unwrap();
@@ -4238,18 +4339,16 @@ identity_profiles:
 
     #[test]
     fn check_profiles_deserialize_with_direct_ci_commands() {
-        let config: LocalConfig = serde_norway::from_str(
-            r#"check_profiles:
-  rust-project:
-    path_prefixes:
-      - ~/Documents/example
-    remote_patterns:
-      - github.com/example/project
-    checks:
-      - name: format
-        program: cargo
-        args: [fmt, --all, --check]
-        timeout_seconds: 900
+        let config: LocalConfig = toml::from_str(
+            r#"[check_profiles.rust-project]
+path_prefixes = ["~/Documents/example"]
+remote_patterns = ["github.com/example/project"]
+
+[[check_profiles.rust-project.checks]]
+name = "format"
+program = "cargo"
+args = ["fmt", "--all", "--check"]
+timeout_seconds = 900
 "#,
         )
         .unwrap();

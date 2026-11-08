@@ -1,7 +1,9 @@
 /target/
 /.idea/
 /.vscode/
+.gitdcy.local.toml
 .gitdcy.local.yaml
+.gitdcy.local.yaml.bak-*
 workspace.local.yaml
 *.log
 

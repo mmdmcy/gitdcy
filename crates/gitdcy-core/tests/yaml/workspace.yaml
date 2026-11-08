@@ -1,0 +1,16 @@
+workspace_root: /home/u/Code
+repos:
+- id: github/app
+  path: /home/u/Code/github/app
+  provider: github
+  enabled: true
+  primary_remote: origin
+  wip_sync: false
+  review_required: true
+- id: 'other/x: y'
+  path: /home/u/Code/x
+  provider: other
+  enabled: false
+  primary_remote: null
+  wip_sync: true
+  review_required: false

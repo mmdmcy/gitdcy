@@ -187,8 +187,25 @@ opening the GUI.
 ## Local Config
 
 GitDCY reads machine-local settings from the app config directory as
-`local.yaml`. When run from this source checkout, it also reads
-`.gitdcy.local.yaml`; that file is ignored by Git.
+`local.toml`, and keeps the workspace manifest there as `workspace.toml`. When
+run from this source checkout, it also reads `.gitdcy.local.toml`; that file
+is ignored by Git.
+
+Until 2026-11-08 these files were YAML (`local.yaml`, `workspace.yaml`,
+`.gitdcy.local.yaml`). GitDCY still reads a YAML file that has no TOML beside
+it, and converts it: it writes the TOML, reads it back to check that every
+value is the same, and only then moves the YAML aside as
+`NAME.yaml.bak-YYYY-MM-DD` (a later rollback can copy it back). It reads the
+YAML style GitDCY wrote and the same by hand (comments, quoted values,
+`[a, b]` lists); anything else (anchors, tags, `|` blocks, `{a: b}`) is
+refused with its line and the file is left as it is, which fails closed like
+any unreadable config. A file that would lose something as TOML (a key that is
+no GitDCY setting) is read as YAML and not converted. A folder's
+`.gitdcy.local.yaml` is converted only where Git ignores it,
+`.gitdcy.local.toml` and `.gitdcy.local.yaml.bak-*`, so the conversion never
+leaves settings in front of `git add` or takes a tracked file away. With
+`GITDCY_READ_ONLY_STATUS=1` nothing is converted. `gitdcy doctor` lists every
+settings file that is still YAML, and why.
 
 The GUI writes per-device settings, including the `.env` checkbox, to the app
 config directory. Those settings are not committed to this repo.
@@ -203,41 +220,39 @@ profiles match, GitDCY treats the repository as unsafe. A configured identity
 profile also checks both the author and committer identity, including Git
 identity environment overrides.
 
-Add profiles to `local.yaml` or the ignored `.gitdcy.local.yaml` file. Identity
+Add profiles to `local.toml` or the ignored `.gitdcy.local.toml` file. Identity
 enforcement turns on automatically when profiles exist; set
-`require_identity: true` explicitly to fail closed even before profiles are
+`require_identity = true` explicitly to fail closed even before profiles are
 written. GitDCY does not rewrite repository `.git/config`, global Git config,
 SSH keys, credentials, or any repository content.
 
 For a three-account layout, keep the private path prefixes and account values
 in the ignored local config. A generic shape is:
 
-```yaml
-scan_roots:
-  - ~/Documents/private-workspace
-  - ~/Documents/forgejo
-  - ~/Documents/github
-require_identity: true
-identity_profiles:
-  github-main:
-    name: YOUR_MAIN_GITHUB_NAME
-    email: YOUR_MAIN_GITHUB_NOREPLY_EMAIL
-    path_prefixes:
-      - ~/Documents/private-workspace/project-a
-    remote_patterns:
-      - github.com/your-account/project-a
-  github-special:
-    name: YOUR_SPECIAL_GITHUB_NAME
-    email: YOUR_SPECIAL_GITHUB_EMAIL
-    path_prefixes:
-      - ~/Documents/private-workspace/special-projects
-    remote_patterns:
-      - your-github-ssh-alias
-  forgejo-selfhosted:
-    name: YOUR_FORGEJO_NAME
-    email: YOUR_FORGEJO_EMAIL
-    providers:
-      - forgejo
+```toml
+scan_roots = [
+  "~/Documents/private-workspace",
+  "~/Documents/forgejo",
+  "~/Documents/github",
+]
+require_identity = true
+
+[identity_profiles.github-main]
+name = "YOUR_MAIN_GITHUB_NAME"
+email = "YOUR_MAIN_GITHUB_NOREPLY_EMAIL"
+path_prefixes = ["~/Documents/private-workspace/project-a"]
+remote_patterns = ["github.com/your-account/project-a"]
+
+[identity_profiles.github-special]
+name = "YOUR_SPECIAL_GITHUB_NAME"
+email = "YOUR_SPECIAL_GITHUB_EMAIL"
+path_prefixes = ["~/Documents/private-workspace/special-projects"]
+remote_patterns = ["your-github-ssh-alias"]
+
+[identity_profiles.forgejo-selfhosted]
+name = "YOUR_FORGEJO_NAME"
+email = "YOUR_FORGEJO_EMAIL"
+providers = ["forgejo"]
 ```
 
 `identity status --all` is read-only and shows the selected profile, expected
@@ -257,36 +272,39 @@ GitHub Actions workflow steps and does not invoke a shell for configured
 commands.
 
 Use `check <repo>` while working on a repository, or `check --all` for the
-workspace. A matching profile with `run_before_push: true` is run automatically
+workspace. A matching profile with `run_before_push = true` is run automatically
 by `gitdcy push`. Push checks require a clean worktree by default so the local
 result corresponds to the commit being pushed; manual checks still run against
-the current worktree. Set `require_checks: true` to fail closed when a
+the current worktree. Set `require_checks = true` to fail closed when a
 repository has no matching profile. With no profiles configured, checks remain
 disabled.
 
 Example local-only configuration:
 
-```yaml
-require_checks: false
-check_profiles:
-  rust-project:
-    path_prefixes:
-      - ~/Documents/github/my-rust-project
-    remote_patterns:
-      - github.com/your-account/my-rust-project
-    run_before_push: true
-    require_clean_worktree: true
-    checks:
-      - name: format
-        program: cargo
-        args: [fmt, --all, --check]
-      - name: clippy
-        program: cargo
-        args: [clippy, --all-targets, --all-features, --, -D, warnings]
-        timeout_seconds: 900
-      - name: tests
-        program: cargo
-        args: [test]
+```toml
+require_checks = false
+
+[check_profiles.rust-project]
+path_prefixes = ["~/Documents/github/my-rust-project"]
+remote_patterns = ["github.com/your-account/my-rust-project"]
+run_before_push = true
+require_clean_worktree = true
+
+[[check_profiles.rust-project.checks]]
+name = "format"
+program = "cargo"
+args = ["fmt", "--all", "--check"]
+
+[[check_profiles.rust-project.checks]]
+name = "clippy"
+program = "cargo"
+args = ["clippy", "--all-targets", "--all-features", "--", "-D", "warnings"]
+timeout_seconds = 900
+
+[[check_profiles.rust-project.checks]]
+name = "tests"
+program = "cargo"
+args = ["test"]
 ```
 
 Each check has a bounded timeout and output capture. GitDCY sets `CI=true`,
@@ -335,8 +353,8 @@ different first commit, so give such a rule its `remotes` too. The file is
 strict: an unknown key, an unknown `push` word, an empty list or two rules for
 one repository is an error, and an error refuses the push.
 
-GitDCY reads the rules file from `rules_file` in this device's own `local.yaml`
-(never from a `.gitdcy.local.yaml` in the current folder, which a repository
+GitDCY reads the rules file from `rules_file` in this device's own `local.toml`
+(never from a `.gitdcy.local.toml` in the current folder, which a repository
 could carry), else `rules.toml` in GitDCY's config folder. `--rules FILE`
 overrides both.
 
@@ -567,7 +585,7 @@ the `sync` remote in the GUI.
 Configure machine-specific paths and remote templates in a local ignored file:
 
 ```bash
-cp .gitdcy.local.example.yaml .gitdcy.local.yaml
+cp .gitdcy.local.example.toml .gitdcy.local.toml
 ```
 
 The CLI equivalent for setting one repo's private sync remote is:
@@ -588,10 +606,9 @@ Ignored local files such as `.env` are not included by default. To move one
 through private WIP sync, select a repo in the GUI and enable **Sync .env through
 private WIP**. The local config equivalent is:
 
-```yaml
-local_sync_files:
-  github/my-app:
-    - .env
+```toml
+[local_sync_files]
+"github/my-app" = [".env"]
 ```
 
 This does not change normal commits. `Commit All Non-Ignored Changes` still
@@ -623,14 +640,13 @@ cargo run -p gitdcy-cli -- install-ignore --global
 
 Use local-only visibility overrides for unusual remotes:
 
-```yaml
-visibility_overrides:
-  github/private-app: private
-  gitlab/public-export: public
-private_remote_patterns:
-  - forgejo-easy
-public_export_remotes:
-  - public
+```toml
+private_remote_patterns = ["forgejo-easy"]
+public_export_remotes = ["public"]
+
+[visibility_overrides]
+"github/private-app" = "private"
+"gitlab/public-export" = "public"
 ```
 
 Check and apply repo policy drift:

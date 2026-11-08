@@ -760,6 +760,35 @@ impl<'de> de::MapAccess<'de> for Entries<'_> {
     }
 }
 
+/// The first key in `node` whose value is not none that `kept` lacks (the
+/// same tree as JSON, as a value serializes): a setting a conversion would
+/// drop.
+pub(crate) fn first_dropped_key(node: &Node, kept: &serde_json::Value) -> Option<String> {
+    match (node, kept) {
+        (Node::Map(entries), serde_json::Value::Object(kept)) => {
+            entries.iter().find_map(|(key, value)| {
+                if matches!(value, Node::Scalar { text, plain: true, .. } if is_null(text)) {
+                    return None;
+                }
+                match kept.get(key) {
+                    None => Some(key.clone()),
+                    Some(inner) => {
+                        first_dropped_key(value, inner).map(|deeper| format!("{key}.{deeper}"))
+                    }
+                }
+            })
+        }
+        (Node::Seq(items), serde_json::Value::Array(kept)) => items
+            .iter()
+            .zip(kept)
+            .enumerate()
+            .find_map(|(i, (item, kept))| {
+                first_dropped_key(item, kept).map(|deeper| format!("{i}.{deeper}"))
+            }),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -927,5 +956,105 @@ indented:
         assert_eq!(quoted.missing.as_deref(), Some("null"));
         assert!(from_str::<Settings>("name: x\non: yes\nlist: []\n").is_err());
         assert!(from_str::<Settings>("name: x\non: true\nlist: []\ncount: '5'\n").is_err());
+    }
+
+    #[test]
+    fn reads_back_what_serde_norway_wrote() {
+        use crate::{
+            CheckCommand, CheckProfile, GitIdentityProfile, LocalConfig, Provider, RepoEntry,
+            VisibilityOverride, WorkspaceManifest,
+        };
+        use std::collections::BTreeMap;
+        use std::path::PathBuf;
+        fn json<T: serde::Serialize>(value: &T) -> serde_json::Value {
+            serde_json::to_value(value).unwrap()
+        }
+        let local = LocalConfig {
+            workspace_root: Some(PathBuf::from("~/Code")),
+            scan_roots: Some(vec![
+                PathBuf::from("/home/u/Documents/github"),
+                PathBuf::from(" lead"),
+            ]),
+            sync_remote_template: Some("ssh://git@example.internal/o/{repo}.git".into()),
+            origin_remote_templates: Some(BTreeMap::from([
+                ("github".into(), "true".into()),
+                ("gitlab".into(), "a: b # c".into()),
+            ])),
+            local_sync_files: Some(BTreeMap::from([(
+                "github/app".into(),
+                vec![".env".into(), "-D".into()],
+            )])),
+            trusted_wip_devices: Some(BTreeMap::from([(
+                "*".into(),
+                vec!["laptop".into(), "123".into()],
+            )])),
+            visibility_overrides: Some(BTreeMap::from([(
+                "github/private".into(),
+                VisibilityOverride::Private,
+            )])),
+            private_remote_patterns: Some(vec![]),
+            public_export_remotes: Some(vec!["~".into(), "'q'".into(), "é\t\u{7}".into()]),
+            ignore_profiles: Some(BTreeMap::new()),
+            require_identity: Some(true),
+            identity_profiles: Some(BTreeMap::from([(
+                "main".into(),
+                GitIdentityProfile {
+                    name: "A \"B\"".into(),
+                    email: "a@b.c".into(),
+                    path_prefixes: vec![PathBuf::from("~/x")],
+                    remote_patterns: vec![],
+                    providers: vec![Provider::Forgejo],
+                },
+            )])),
+            require_checks: None,
+            check_profiles: Some(BTreeMap::from([(
+                "rust".into(),
+                CheckProfile {
+                    path_prefixes: vec![],
+                    remote_patterns: vec!["github.com/o/a".into()],
+                    providers: vec![],
+                    checks: vec![CheckCommand {
+                        name: "clippy".into(),
+                        program: "cargo".into(),
+                        args: vec!["--".into(), "-D".into(), "warnings".into()],
+                        timeout_seconds: Some(900),
+                    }],
+                    run_before_push: false,
+                    require_clean_worktree: true,
+                },
+            )])),
+            rules_file: Some(PathBuf::from("/home/u/fleet/repos.toml")),
+            config_error: None,
+        };
+        let manifest = WorkspaceManifest {
+            workspace_root: PathBuf::from("/home/u/Code"),
+            repos: vec![
+                RepoEntry {
+                    id: "github/app".into(),
+                    path: PathBuf::from("/home/u/Code/github/app"),
+                    provider: Provider::Github,
+                    enabled: true,
+                    primary_remote: Some("origin".into()),
+                    wip_sync: false,
+                    review_required: true,
+                },
+                RepoEntry {
+                    id: "other/x: y".into(),
+                    path: PathBuf::from("/home/u/Code/x"),
+                    provider: Provider::Other,
+                    enabled: false,
+                    primary_remote: None,
+                    wip_sync: true,
+                    review_required: false,
+                },
+            ],
+        };
+        let read: LocalConfig = from_str(include_str!("../tests/yaml/local.yaml")).unwrap();
+        assert_eq!(json(&read), json(&local));
+        let read: WorkspaceManifest =
+            from_str(include_str!("../tests/yaml/workspace.yaml")).unwrap();
+        assert_eq!(json(&read), json(&manifest));
+        let read: LocalConfig = from_str(include_str!("../tests/yaml/empty.yaml")).unwrap();
+        assert_eq!(json(&read), json(&LocalConfig::default()));
     }
 }
