@@ -19,6 +19,10 @@ mod process;
 pub mod relate;
 pub mod rules;
 pub mod scan;
+#[cfg_attr(not(test), allow(dead_code))] // read from the next commit on
+mod yaml;
+#[cfg(test)]
+mod yaml_vs_norway;
 
 pub const APP_NAME: &str = "GitDCY";
 pub const SYNC_REMOTE: &str = "sync";
