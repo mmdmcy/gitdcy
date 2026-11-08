@@ -194,7 +194,7 @@ func (c *cliCmd) Sub(subs ...*cliCmd) *cliCmd {
 func (c *cliCmd) built() *cliCmd {
 	b := *c
 	b.args = append([]*cliArg{}, c.args...)
-	for p := c.parent; p != nil; p = p.parent {
+	for p := c.parent; p != nil && !c.isHelpSub; p = p.parent {
 		for _, a := range p.args {
 			if a.global && b.find(a.id) == nil {
 				b.args = append(b.args, a)
