@@ -201,10 +201,12 @@ func (c *cliCmd) built() *cliCmd {
 			}
 		}
 	}
-	b.args = append(b.args, &cliArg{id: "help", long: "help", short: 'h', help: "Print help", isHelp: true, dispOrd: 999})
+	if !c.isHelpSub {
+		b.args = append(b.args, &cliArg{id: "help", long: "help", short: 'h', help: "Print help", isHelp: true, dispOrd: 999})
+	}
 	if len(c.subs) > 0 && !c.isHelpSub {
 		help := &cliCmd{name: "help", about: "Print this message or the help of the given subcommand(s)", dispOrd: 999, parent: c, isHelpSub: true}
-		help.args = []*cliArg{posArg("subcommand", "COMMAND").Values(0, -1)}
+		help.args = []*cliArg{posArg("subcommand", "COMMAND").Values(0, -1).Help("Print help for the subcommand(s)")}
 		b.subs = append(append([]*cliCmd{}, c.subs...), help)
 	}
 	return &b
@@ -787,7 +789,11 @@ func usageError(c *cliCmd, message, usage string) error {
 	if usage != "" {
 		text += "\n\n" + usage
 	}
-	text += "\n\nFor more information, try '--help'.\n"
+	if c.isHelpSub {
+		text += "\n"
+	} else {
+		text += "\n\nFor more information, try '--help'.\n"
+	}
 	return &cliExit{text: text, stderr: true, code: 2}
 }
 
@@ -824,12 +830,47 @@ func unknownLong(c *cliCmd, m *cliMatches, name string, remaining []string, trai
 			used = append(used, a.id)
 		}
 	}
+	if similar == "" {
+		best, bestScore := "", -1
+		for _, sub := range c.subs {
+			var subLongs []string
+			for _, a := range sub.args {
+				if a.long != "" {
+					subLongs = append(subLongs, a.long)
+				}
+			}
+			if !sub.isHelpSub {
+				subLongs = append(subLongs, "help")
+			}
+			s := didYouMean(name, subLongs)
+			if len(s) == 0 {
+				continue
+			}
+			score := -1
+			for i, r := range remaining {
+				if r == sub.name {
+					score = i
+					break
+				}
+			}
+			if score >= 0 && (bestScore < 0 || score < bestScore) {
+				best, bestScore = sub.name+" --"+s[len(s)-1], score
+			}
+		}
+		if best != "" {
+			text := fmt.Sprintf("unexpected argument '--%s' found\n\n  tip: '%s' exists", name, best)
+			return usageError(c, text, usageFor(c, m.order))
+		}
+	}
 	trailingTip := similar == "" && !trailing && len(c.positionals()) > 0
 	return unknownArgError(c, "--"+name, similar, trailingTip, usageFor(c, used))
 }
 
 // matchArgError is the error for a value that is no positional here.
 func matchArgError(c *cliCmd, m *cliMatches, arg string, valid, trailing bool) error {
+	if trailing && c.findSub(arg) != nil {
+		return usageError(c, fmt.Sprintf("unexpected argument '%s' found\n\n  tip: subcommand '%s' exists; to use it, remove the '--' before it", arg, arg), helpUsage(c))
+	}
 	hasPos := len(c.positionals()) > 0
 	trailingTip := !trailing && hasPos && strings.HasPrefix(arg, "-") && len(arg) > 1
 	if len(c.subs) > 0 {
@@ -859,9 +900,10 @@ func matchArgError(c *cliCmd, m *cliMatches, arg string, valid, trailing bool) e
 // helpSubcommand is `help [COMMAND]...`: the help of the command named.
 func helpSubcommand(c *cliCmd, names []string) error {
 	for _, name := range names {
-		s := c.findSub(name)
+		b := c.built()
+		s := b.findSub(name)
 		if s == nil {
-			return usageError(c, fmt.Sprintf("unrecognized subcommand '%s'", name), helpUsage(c.built()))
+			return usageError(b, fmt.Sprintf("unrecognized subcommand '%s'", name), helpUsage(b))
 		}
 		c = s
 	}

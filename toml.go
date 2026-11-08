@@ -63,6 +63,9 @@ type tomlNode struct {
 	span  int
 	// An array of tables ([[x]]), which more [[x]] headers may extend.
 	tableArray bool
+	// An integer too large for 64 bits: kept so an unknown key may hold
+	// one, refused when a setting takes it.
+	overflow bool
 }
 
 // tomlTable is a table: its keys in the order written.
@@ -524,6 +527,9 @@ func (r *tomlReader) value() (*tomlNode, error) {
 	if n, ok := parseTomlInteger(word); ok {
 		return node(&tomlNode{kind: tomlInteger, num: n})
 	}
+	if tomlIntegerShape(word) {
+		return node(&tomlNode{kind: tomlInteger, str: word, overflow: true})
+	}
 	if f, ok := parseTomlFloat(word); ok {
 		return node(&tomlNode{kind: tomlFloat, float: f})
 	}
@@ -588,6 +594,20 @@ func parseTomlInteger(word string) (int64, bool) {
 		return 0, false
 	}
 	return n, true
+}
+
+// tomlIntegerShape reports a decimal integer too large for 64 bits.
+func tomlIntegerShape(word string) bool {
+	digits := strings.TrimLeft(word, "+-")
+	if len(word)-len(digits) > 1 || digits == "" || digits[0] == '0' || digits[0] == '_' || digits[len(digits)-1] == '_' || strings.Contains(digits, "__") {
+		return false
+	}
+	for _, c := range digits {
+		if !(c >= '0' && c <= '9' || c == '_') {
+			return false
+		}
+	}
+	return true
 }
 
 // parseTomlFloat reads a TOML float.
@@ -899,6 +919,9 @@ func describeNode(n *tomlNode) string {
 	case tomlString:
 		return "string " + rustDebug(n.str)
 	case tomlInteger:
+		if n.overflow {
+			return "integer `" + n.str + "`"
+		}
 		return "integer `" + strconv.FormatInt(n.num, 10) + "`"
 	case tomlFloat:
 		return "floating point `" + strconv.FormatFloat(n.float, 'g', -1, 64) + "`"
@@ -942,6 +965,9 @@ func plainValue(n *tomlNode) any {
 	case tomlString, tomlDatetime:
 		return n.str
 	case tomlInteger:
+		if n.overflow {
+			return n.str
+		}
 		return n.num
 	case tomlFloat:
 		return n.float
@@ -1009,6 +1035,9 @@ func (r *tomlReader) decode(n *tomlNode, v reflect.Value) error {
 		if n.kind != tomlInteger {
 			return r.typeError(n, expectedText(v.Type()))
 		}
+		if n.overflow {
+			return r.errAt(n.line, n.col, n.span, "number too large to fit in target type")
+		}
 		if n.num < 0 {
 			return r.errAt(n.line, n.col, n.span, "invalid value: integer `%d`, expected %s", n.num, expectedText(v.Type()))
 		}
@@ -1019,6 +1048,9 @@ func (r *tomlReader) decode(n *tomlNode, v reflect.Value) error {
 	case reflect.Int64, reflect.Int:
 		if n.kind != tomlInteger {
 			return r.typeError(n, expectedText(v.Type()))
+		}
+		if n.overflow {
+			return r.errAt(n.line, n.col, n.span, "number too large to fit in target type")
 		}
 		v.SetInt(n.num)
 	case reflect.Slice:
@@ -1397,7 +1429,7 @@ func tomlKeyText(s string) string {
 	case bare:
 		return s
 	case !controls && !backslash && !double:
-		return `"` + s + `"`
+		return tomlBasic(s, false)
 	case !controls && !single:
 		return "'" + s + "'"
 	}
