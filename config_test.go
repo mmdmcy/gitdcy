@@ -10,13 +10,13 @@ import (
 
 // What serde_norway 0.9.42 wrote for these settings (its output, frozen
 // before it left the Rust build).
-func yamlFixture(t *testing.T, name string) string {
+func configYAMLFixture(t *testing.T, name string) string {
 	return readFile(t, filepath.Join("testdata", "yaml", name))
 }
 
 func TestAYAMLFileBecomesTOMLWithTheSameValuesAndAKeptCopy(t *testing.T) {
 	for _, name := range []string{"local.yaml", "empty.yaml"} {
-		text := yamlFixture(t, name)
+		text := configYAMLFixture(t, name)
 		dir := t.TempDir()
 		must(t, os.WriteFile(filepath.Join(dir, "local.yaml"), []byte(text), 0o644))
 		found := findSettings(dir, "local")
@@ -44,7 +44,7 @@ func TestAYAMLFileBecomesTOMLWithTheSameValuesAndAKeptCopy(t *testing.T) {
 			t.Fatalf("%s:\n%s", name, tomlText)
 		}
 	}
-	text := yamlFixture(t, "workspace.yaml")
+	text := configYAMLFixture(t, "workspace.yaml")
 	dir := t.TempDir()
 	must(t, os.WriteFile(filepath.Join(dir, "workspace.yaml"), []byte(text), 0o644))
 	found := findSettings(dir, "workspace")
