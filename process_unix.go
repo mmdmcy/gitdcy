@@ -148,12 +148,51 @@ func readBoundedUntilStopped(f *os.File, limit int, stop *atomic.Bool) ([]byte, 
 		}
 		if errors.Is(err, os.ErrDeadlineExceeded) {
 			if stop.Load() {
-				return data, truncated, nil
+				return readLeft(f, limit, data, truncated)
 			}
 			continue
 		}
 		return data, truncated, ioError(err)
 	}
+}
+
+// readLeft adds to data what a command that ended left in f, without
+// waiting for more, as the Rust runner read it. The drain deadline alone
+// lost it whenever this reader ran later than the deadline: on a busy
+// machine, a quarter of the outputs of short git reads (2026-11-09).
+func readLeft(f *os.File, limit int, data []byte, truncated bool) ([]byte, bool, error) {
+	raw, err := f.SyscallConn()
+	if err != nil || f.SetReadDeadline(time.Time{}) != nil {
+		return data, truncated, nil
+	}
+	buffer := make([]byte, 8192)
+	var readErr error
+	err = raw.Read(func(fd uintptr) bool {
+		for !truncated {
+			n, err := syscall.Read(int(fd), buffer)
+			if n > 0 {
+				kept := min(n, max(limit-len(data), 0))
+				data = append(data, buffer[:kept]...)
+				truncated = kept < n
+				continue
+			}
+			if err == syscall.EINTR {
+				continue
+			}
+			if err != nil && err != syscall.EAGAIN {
+				readErr = err
+			}
+			break
+		}
+		return true
+	})
+	if err == nil {
+		err = readErr
+	}
+	if err != nil {
+		return data, truncated, ioError(err)
+	}
+	return data, truncated, nil
 }
 
 // killGroup ends cmd's process group; a group already gone is fine.
