@@ -413,6 +413,18 @@ from the start of that day). The text lists only checkouts with something to
 say. A missing checkout is a warning; the exit code is 0 unless the command
 itself failed.
 
+A scan reads each pushed commit once. It keeps what it found in each commit
+of the window, by commit id, in the user's cache folder (`gitdcy/pushed-read.json`
+in `$XDG_CACHE_HOME`, else `~/.cache`, on Linux; `~/Library/Caches` on macOS;
+`%LocalAppData%` on Windows). The next scan lists the commits in the window
+without their diffs and reads only the ones it has not read; the findings are
+the same as a full read gives. A change to the rules file, to the repository's
+own git identities or to gitdcy itself reads every commit in the window again,
+and so does a rewritten history (a force push), whose commits have new ids. The
+file holds commit ids and what was found, masked as a scan shows it; removing it
+costs one full read. `rules check`, the push check, always reads every commit a
+push sends.
+
 ### No dirty dishes
 
 With a `[hygiene]` table in the rules file, `rules scan` and `rules check` also

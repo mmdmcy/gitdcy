@@ -171,37 +171,63 @@ func personalDefaultRange(repo string) []string {
 	return []string{"HEAD", "--not", "--remotes"}
 }
 
-// personalScanCommits reads the commits in rng (git log syntax) for
-// personal data; it returns how many commits were read and what was found.
-func personalScanCommits(repo string, rng []string, config personalConfig) (int, []Finding, error) {
-	allowed := personalOwnIdentities(repo, config.allow)
+// personalCommit is one commit read for personal data.
+type personalCommit struct {
+	// The full commit id, and the abbreviated one findings name.
+	id, short string
+	findings  []Finding
+}
+
+// personalHeader reports whether a record of personalLog's output starts as
+// a commit does: its full id, then the field separator. A diff line or a
+// message can hold the record separator too; what follows it is no commit.
+func personalHeader(record string) bool {
+	id, _, ok := strings.Cut(record, "\x1f")
+	return ok && (len(id) == 40 || len(id) == 64) && rulesAllHex(id)
+}
+
+// personalLog reads the commits `git log` selects with revs for personal
+// data, in git log's order; stdin is what git reads from standard input
+// (commit ids, with --stdin), "" for nothing.
+func personalLog(repo string, revs []string, stdin string, config personalConfig, allowed map[string]bool) ([]personalCommit, error) {
 	args := []string{
 		"-c", "core.quotePath=false", "log", "-p", "-U0", "--no-color", "--no-renames",
 		"--no-ext-diff", "--no-textconv", "--src-prefix=a/", "--dst-prefix=b/",
-		"--format=%x1e%h%x1f%an <%ae>%x1f%cn <%ce>%x1f%B%x1f",
+		"--format=%x1e%H%x1f%h%x1f%an <%ae>%x1f%cn <%ce>%x1f%B%x1f",
 	}
-	log, err := gitOutput(repo, append(args, rng...)...)
+	cmd := gitCommand(repo, append(args, revs...)...)
+	if stdin != "" {
+		cmd.Stdin = strings.NewReader(stdin)
+	}
+	out, err := runGit(cmd)
 	if err != nil {
-		return 0, nil, err
+		return nil, err
 	}
-	var findings []Finding
-	commits := 0
-	records := strings.Split(log, "\x1e")
-	for _, record := range records[1:] {
-		commits++
-		parts := strings.SplitN(record, "\x1f", 5)
-		if len(parts) < 5 {
+	var records []string
+	for i, record := range strings.Split(lossy(out.Stdout), "\x1e")[1:] {
+		if i > 0 && !personalHeader(record) {
+			records[len(records)-1] += "\x1e" + record
 			continue
 		}
-		hash, diff := parts[0], parts[4]
+		records = append(records, record)
+	}
+	commits := make([]personalCommit, 0, len(records))
+	for _, record := range records {
+		parts := strings.SplitN(record, "\x1f", 6)
+		if len(parts) < 6 {
+			commits = append(commits, personalCommit{})
+			continue
+		}
+		c := personalCommit{id: parts[0], short: parts[1]}
+		diff := parts[5]
 		note := func(place, text string) {
 			for _, f := range personalIn(text, config.words, allowed) {
-				findings = append(findings, Finding{Commit: hash, Place: place, Kind: f.kind, Shown: f.shown})
+				c.findings = append(c.findings, Finding{Commit: c.short, Place: place, Kind: f.kind, Shown: f.shown})
 			}
 		}
-		note("author", parts[1])
-		note("committer", parts[2])
-		note("message", parts[3])
+		note("author", parts[2])
+		note("committer", parts[3])
+		note("message", parts[4])
 		path := ""
 		lineNo := uint64(0)
 		for _, line := range lines(diff) {
@@ -220,8 +246,23 @@ func personalScanCommits(repo string, rng []string, config personalConfig) (int,
 				lineNo++
 			}
 		}
+		commits = append(commits, c)
 	}
-	return commits, findings, nil
+	return commits, nil
+}
+
+// personalScanCommits reads the commits in rng (git log syntax) for
+// personal data; it returns how many commits were read and what was found.
+func personalScanCommits(repo string, rng []string, config personalConfig) (int, []Finding, error) {
+	commits, err := personalLog(repo, rng, "", config, personalOwnIdentities(repo, config.allow))
+	if err != nil {
+		return 0, nil, err
+	}
+	var findings []Finding
+	for _, c := range commits {
+		findings = append(findings, c.findings...)
+	}
+	return len(commits), findings, nil
 }
 
 // rustLower is Rust's str::to_lowercase: each character's full lowercase

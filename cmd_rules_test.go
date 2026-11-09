@@ -76,6 +76,7 @@ func (s *rulesSandbox) command(program, dir string, env []string, args ...string
 	set := map[string]string{
 		"HOME":                home,
 		"XDG_CONFIG_HOME":     filepath.Join(home, ".config"),
+		"XDG_CACHE_HOME":      filepath.Join(home, ".cache"),
 		"GIT_CONFIG_GLOBAL":   filepath.Join(home, ".gitconfig"),
 		"GIT_CONFIG_NOSYSTEM": "1",
 		"PATH":                s.path,
@@ -871,5 +872,99 @@ func TestRulesCmdWithoutGhPullRequestsAreUnknownAndASkippedRepositoryGetsNoRemin
 	out = s.gitdcy(work, "rules", "check", "--format", "json")
 	if reminders, ok := rulesAt(rulesJSON(t, out), "data", "reminders").([]any); !ok || len(reminders) != 0 {
 		t.Error(out.text())
+	}
+}
+
+// rulesPushedCache is the sandbox's cache of pushed commits already read,
+// and a way to write it back.
+func (s *rulesSandbox) pushedCache() (*pushedCache, func()) {
+	s.t.Helper()
+	path := filepath.Join(s.root, "home/.cache/gitdcy", pushedFile)
+	var cache pushedCache
+	if err := json.Unmarshal([]byte(rulesRead(s.t, path)), &cache); err != nil {
+		s.t.Fatal(err)
+	}
+	return &cache, func() {
+		data, err := json.Marshal(&cache)
+		if err != nil {
+			s.t.Fatal(err)
+		}
+		rulesWrite(s.t, path, string(data))
+	}
+}
+
+// rulesPushedPlaces is the places of a scan's pushed findings, in order.
+func rulesPushedPlaces(t *testing.T, out rulesOut) []string {
+	t.Helper()
+	checkout := rulesAt(rulesJSON(t, out), "data", "checkouts", 0)
+	var places []string
+	for i := 0; i < rulesLen(rulesAt(checkout, "pushed_findings")); i++ {
+		place, _ := rulesAt(checkout, "pushed_findings", i, "place").(string)
+		places = append(places, place)
+	}
+	return places
+}
+
+func TestRulesCmdAScanReadsAPushedCommitOnceUntilTheRulesOrTheHistoryChange(t *testing.T) {
+	s := newRulesSandbox(t)
+	work, first := s.repo("app")
+	rules := rulesRule(first, `"anywhere"`, "")
+	s.rules(rules)
+	old := s.commit(work, "OLD", "mail "+rulesPrivateAddress()+"\n")
+	s.ok(work, "push", "-q", "origin", "main")
+	scan := func() rulesOut {
+		out := s.gitdcy(work, "rules", "scan", "--format", "json", ".")
+		if out.code != 0 {
+			t.Fatal(out.text())
+		}
+		return out
+	}
+	if got := rulesPushedPlaces(t, scan()); strings.Join(got, ",") != "OLD:1" {
+		t.Fatalf("the first scan reads every pushed commit: %v", got)
+	}
+
+	// What the cache says of the old commit is what a scan shows from now
+	// on: a finding planted there shows it was not read again.
+	cache, save := s.pushedCache()
+	root := s.ok(work, "rev-parse", "--show-toplevel")
+	kept := cache.Checkouts[root]
+	if kept == nil || len(kept.Commits) != 2 {
+		t.Fatalf("both pushed commits are kept: %+v", cache)
+	}
+	kept.Commits[old] = []Finding{{Place: "planted", Kind: findingPersonalWord, Shown: "p…"}}
+	save()
+
+	// A new pushed commit is read; the old one is not.
+	s.commit(work, "NEW", "mail "+personalAt("other", "hotmail.com")+"\n")
+	s.ok(work, "push", "-q", "origin", "main")
+	out := scan()
+	if got := rulesPushedPlaces(t, out); strings.Join(got, ",") != "NEW:1,planted" {
+		t.Fatalf("only the new commit is read: %v", got)
+	}
+	if rulesAt(rulesJSON(t, out), "data", "checkouts", 0, "pushed_commits") != float64(3) {
+		t.Errorf("%s", out.text())
+	}
+
+	// A change to the rules file reads every commit again.
+	s.rules(rules + "# changed\n")
+	if got := rulesPushedPlaces(t, scan()); strings.Join(got, ",") != "NEW:1,OLD:1" {
+		t.Fatalf("a rules change reads everything again: %v", got)
+	}
+
+	// A rewritten history is read again: the new commit's replacement holds
+	// another address, and the commit it replaced is no longer kept.
+	replaced := s.ok(work, "rev-parse", "HEAD")
+	rulesWrite(t, filepath.Join(work, "NEW"), "mail "+personalAt("third", "outlook.com")+"\n")
+	s.ok(work, "commit", "-q", "-a", "--amend", "-m", "change NEW again")
+	s.ok(work, "push", "-q", "-f", "origin", "main")
+	out = scan()
+	checkout := rulesAt(rulesJSON(t, out), "data", "checkouts", 0)
+	if shown, _ := rulesAt(checkout, "pushed_findings", 0, "shown").(string); shown != "t…@outlook.com" ||
+		strings.Join(rulesPushedPlaces(t, out), ",") != "NEW:1,OLD:1" {
+		t.Fatalf("the rewritten commit is read: %s", out.text())
+	}
+	cache, _ = s.pushedCache()
+	if _, ok := cache.Checkouts[root].Commits[replaced]; ok || len(cache.Checkouts[root].Commits) != 3 {
+		t.Errorf("only the commits in the window are kept: %+v", cache.Checkouts[root])
 	}
 }
