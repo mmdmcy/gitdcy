@@ -4,10 +4,12 @@ package main
 // only. Per checkout: which rule applies and where it lets the repository
 // go, the remotes that rule forbids (a self-hosted-only repository with a
 // public remote), whether git runs the push check there, personal data in
-// what already reached a remote, and the reminders about work left lying
-// around (hygiene.go).
+// what already reached a remote (only the commits not read before:
+// pushed.go), and the reminders about work left lying around (hygiene.go).
 
 import (
+	"errors"
+	"io/fs"
 	"os"
 	"strings"
 	"sync"
@@ -198,7 +200,15 @@ func rulesScan(rulesPath string, paths []string, since *string, gitdcy, gh strin
 	for i := range paths {
 		jobs[i] = job{paths[i], reads[i]}
 	}
-	checkouts := scanParallel(jobs, func(j job) CheckoutScan {
+	cachePath := pushedPath()
+	cache := pushedLoad(cachePath)
+	base := pushedBase(rulesPath)
+	type done struct {
+		found CheckoutScan
+		// What to keep of its pushed commits; nil when they were not read.
+		kept *pushedRead
+	}
+	results := scanParallel(jobs, func(j job) done {
 		found := CheckoutScan{Path: j.given}
 		switch {
 		case j.read == nil:
@@ -207,10 +217,10 @@ func rulesScan(rulesPath string, paths []string, since *string, gitdcy, gh strin
 			if rulesIsDir(expandHome(j.given)) {
 				found.Detail = "not a git checkout at that path"
 			}
-			return found
+			return done{found, nil}
 		case j.read.report == nil:
 			found.State, found.Detail = "error", j.read.err
-			return found
+			return done{found, nil}
 		}
 		report := j.read.report
 		found.State = "ok"
@@ -229,7 +239,8 @@ func rulesScan(rulesPath string, paths []string, since *string, gitdcy, gh strin
 		}
 		found.Remotes = report.Remotes
 		root := report.Repository
-		commits, findings, err := personalScanCommits(root, []string{"--remotes", "--since=" + sinceText}, config)
+		allowed := personalOwnIdentities(root, config.allow)
+		commits, findings, kept, err := pushedScan(root, sinceText, config, allowed, pushedAgainst(base, allowed), cache.Checkouts[root])
 		if err != nil {
 			found.Detail = "what reached a remote could not be read: " + scanFirstLine(chainText(err))
 		} else {
@@ -243,11 +254,25 @@ func rulesScan(rulesPath string, paths []string, since *string, gitdcy, gh strin
 			off := "keeps its own rules: its remote starts with " + prefix + " ([hygiene] skip)"
 			found.HygieneOff = &off
 		} else {
-			h := hygRead(root, *rules, urls, github, nil, false)
+			h := hygRead(report.repo, *rules, urls, github, nil, false)
 			found.Hygiene = &h
 		}
-		return found
+		return done{found, kept}
 	})
+	checkouts := make([]CheckoutScan, len(results))
+	for i, r := range results {
+		checkouts[i] = r.found
+		if r.kept != nil {
+			cache.Checkouts[r.found.Repository] = r.kept
+		}
+	}
+	// A checkout that is gone keeps nothing.
+	for root := range cache.Checkouts {
+		if _, err := os.Stat(root); errors.Is(err, fs.ErrNotExist) {
+			delete(cache.Checkouts, root)
+		}
+	}
+	pushedSave(cachePath, cache)
 	return &ScanReport{
 		RulesFile:          rulesPath,
 		RulesFileFound:     file != nil,

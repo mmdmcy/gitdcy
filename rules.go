@@ -446,6 +446,8 @@ type rulesRemote struct {
 	name string
 	// Its URLs (push and fetch), as configured.
 	urls []string
+	// The URL a push goes to (`git remote get-url --push`); "" for none.
+	pushURL string
 }
 
 type rulesRepo struct {
@@ -454,6 +456,9 @@ type rulesRepo struct {
 	gitDir       string
 	firstCommits []string
 	remotes      []rulesRemote
+	// Where git runs hooks from, and this worktree's FETCH_HEAD, when
+	// rulesOpen read them ("" when not: they are asked when needed).
+	hooksDir, fetchHead string
 }
 
 func rulesAbsolute(base, path string) string {
@@ -500,19 +505,30 @@ func rulesOpen(path string) (*rulesRepo, error) {
 	if !rulesIsDir(path) {
 		dir = rulesParent(path)
 	}
-	out, err := gitOutput(dir, "rev-parse", "--path-format=absolute", "--git-common-dir")
-	if err != nil {
-		out, err = gitOutput(dir, "rev-parse", "--absolute-git-dir")
-	}
-	if err != nil {
-		return nil, wrapf(err, "%s is not inside a git repository", path)
-	}
-	repo := &rulesRepo{gitDir: rulesAbsolute(dir, out)}
-	// A bare repository (a mirror) has no work tree; its git folder is the
-	// repository.
-	repo.root = repo.gitDir
-	if top, err := gitOutput(dir, "rev-parse", "--show-toplevel"); err == nil && trim(top) != "" {
-		repo.root = trim(top)
+	repo := &rulesRepo{}
+	// A checkout's top folder, git folder, hooks and FETCH_HEAD in one
+	// question; a bare repository or a git folder has no top folder, and
+	// is asked in parts.
+	out, err := gitOutput(dir, "rev-parse", "--show-toplevel", "--path-format=absolute", "--git-common-dir",
+		"--git-path", "hooks", "--git-path", "FETCH_HEAD")
+	if answer := lines(out); err == nil && len(answer) == 4 && trim(answer[0]) != "" {
+		repo.root, repo.gitDir = trim(answer[0]), rulesAbsolute(dir, answer[1])
+		repo.hooksDir, repo.fetchHead = rulesAbsolute(repo.root, answer[2]), trim(answer[3])
+	} else {
+		out, err := gitOutput(dir, "rev-parse", "--path-format=absolute", "--git-common-dir")
+		if err != nil {
+			out, err = gitOutput(dir, "rev-parse", "--absolute-git-dir")
+		}
+		if err != nil {
+			return nil, wrapf(err, "%s is not inside a git repository", path)
+		}
+		repo.gitDir = rulesAbsolute(dir, out)
+		// A bare repository (a mirror) has no work tree; its git folder is
+		// the repository.
+		repo.root = repo.gitDir
+		if top, err := gitOutput(dir, "rev-parse", "--show-toplevel"); err == nil && trim(top) != "" {
+			repo.root = trim(top)
+		}
 	}
 	commits, _ := gitOutput(repo.root, "rev-list", "--max-parents=0", "--all")
 	for _, line := range lines(commits) {
@@ -528,13 +544,17 @@ func rulesOpen(path string) (*rulesRepo, error) {
 			continue
 		}
 		remote := rulesRemote{name: name}
-		for _, args := range [][]string{
+		for i, args := range [][]string{
 			{"remote", "get-url", "--push", "--all", name},
 			{"remote", "get-url", "--all", name},
 		} {
 			out, err := gitOutput(repo.root, args...)
 			if err != nil {
 				continue
+			}
+			// The first push URL is the one `get-url --push` names.
+			if first := lines(out); i == 0 && len(first) > 0 {
+				remote.pushURL = trim(first[0])
 			}
 			for _, url := range lines(out) {
 				if url = trim(url); url != "" && !contains(remote.urls, url) {
@@ -775,7 +795,9 @@ func rulesSameDir(a, b string) bool {
 func rulesHooksElsewhere(repo *rulesRepo) (dir string, chains, elsewhere bool) {
 	def := joinPath(repo.gitDir, "hooks")
 	effective := def
-	if out, err := gitOutput(repo.root, "rev-parse", "--path-format=absolute", "--git-path", "hooks"); err == nil {
+	if repo.hooksDir != "" {
+		effective = repo.hooksDir
+	} else if out, err := gitOutput(repo.root, "rev-parse", "--path-format=absolute", "--git-path", "hooks"); err == nil {
 		effective = rulesAbsolute(repo.root, out)
 	}
 	if rulesSameDir(effective, def) {
@@ -844,6 +866,8 @@ type RulesReport struct {
 	PersonalWords    int      `json:"personal_words"`
 	AllowedAddresses int      `json:"allowed_addresses"`
 	Warnings         []string `json:"warnings"`
+	// What was read of the repository, for the scan.
+	repo *rulesRepo
 }
 
 func rulesReport(rulesPath, repoPath, gitdcy string) (*RulesReport, error) {
@@ -901,7 +925,7 @@ func rulesReport(rulesPath, repoPath, gitdcy string) (*RulesReport, error) {
 	var remotes []RemoteState
 	for _, remote := range found.repo.remotes {
 		state := RemoteState{Name: remote.name, Allowed: len(found.conflicts) == 0}
-		if url, ok := rulesPushURL(found.repo, remote.name); ok {
+		if url := remote.pushURL; url != "" {
 			shown := normalizeURL(url)
 			state.URL = &shown
 			if found.rule != nil {
@@ -926,6 +950,7 @@ func rulesReport(rulesPath, repoPath, gitdcy string) (*RulesReport, error) {
 		PersonalWords:    len(scan.words),
 		AllowedAddresses: len(scan.allow),
 		Warnings:         warnings,
+		repo:             found.repo,
 	}
 	if found.rule != nil {
 		push := found.rule.Push.describe(found.selfhosted)
@@ -1153,7 +1178,7 @@ func rulesPushReminders(found *rulesFound, pushing []string) []Reminder {
 	if place, ok := githubRepository(urls); ok {
 		github = hygAsk("gh", nil, []string{place}, rulesHookGHTimeout)
 	}
-	return hygRead(found.repo.root, *rules, urls, github, pushing, true).Reminders
+	return hygRead(found.repo, *rules, urls, github, pushing, true).Reminders
 }
 
 func rulesIsZero(sha string) bool {

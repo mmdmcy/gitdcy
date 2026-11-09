@@ -462,33 +462,85 @@ func (g *hygGitHub) of(repository string, onGitHub bool) PullRequests {
 	return PullRequests{State: "known", Repository: repository, Open: append([]PullRequest{}, g.found[strings.ToLower(repository)]...)}
 }
 
+// hygStatus reads the changed files, the upstream and how far behind it
+// the checkout is from one `git status`; false when that did not settle
+// them (git failed, or the branch has no commit yet and an upstream, which
+// status does not say exists), and nothing is set.
+func hygStatus(dir string, h *Hygiene) bool {
+	out, ok := hygGit(dir, "status", "--porcelain=v2", "--branch", "--ahead-behind", "--untracked-files=normal")
+	if !ok {
+		return false
+	}
+	var changed, behind uint64
+	var upstream string
+	initial, counted := false, false
+	for _, line := range lines(out) {
+		header, ok := strings.CutPrefix(line, "# ")
+		if !ok {
+			if line != "" {
+				changed++
+			}
+			continue
+		}
+		switch name, value, _ := strings.Cut(header, " "); name {
+		case "branch.oid":
+			initial = value == "(initial)"
+		case "branch.upstream":
+			upstream = value
+		case "branch.ab":
+			// "+AHEAD -BEHIND"; without it the upstream is gone.
+			_, minus, _ := strings.Cut(value, " -")
+			n, err := strconv.ParseUint(minus, 10, 64)
+			if err != nil {
+				return false
+			}
+			behind, counted = n, true
+		}
+	}
+	if initial && upstream != "" {
+		return false
+	}
+	h.Changed = changed
+	if counted && upstream != "" {
+		h.Upstream, h.Behind = &upstream, behind
+	}
+	return true
+}
+
 // hygRead is the checkout's dishes. urls are its remote URLs; pushing the
 // commits a push sends when beforePush (before a push: what it leaves
 // behind is reminded of, whatever its age), else a scan (commits from
 // before today).
-func hygRead(dir string, rules HygieneRules, urls []string, github *hygGitHub, pushing []string, beforePush bool) Hygiene {
+func hygRead(repo *rulesRepo, rules HygieneRules, urls []string, github *hygGitHub, pushing []string, beforePush bool) Hygiene {
 	at := hygNow()
+	dir := repo.root
 	shown := dir
 	h := Hygiene{}
-	if out, ok := hygGit(dir, "status", "--porcelain=v1", "--untracked-files=normal"); ok {
-		for _, line := range lines(out) {
-			if line != "" {
-				h.Changed++
+	if !hygStatus(dir, &h) {
+		if out, ok := hygGit(dir, "status", "--porcelain=v1", "--untracked-files=normal"); ok {
+			for _, line := range lines(out) {
+				if line != "" {
+					h.Changed++
+				}
 			}
 		}
+		if upstream, ok := hygGit(dir, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"); ok && upstream != "" {
+			h.Upstream = &upstream
+			h.Behind = hygCount(dir, "rev-list", "--count", "HEAD..@{upstream}")
+		}
 	}
-	if upstream, ok := hygGit(dir, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"); ok && upstream != "" {
-		h.Upstream = &upstream
-		h.Behind = hygCount(dir, "rev-list", "--count", "HEAD..@{upstream}")
+	fetchHead, ok := repo.fetchHead, repo.fetchHead != ""
+	if !ok {
+		fetchHead, ok = hygGit(dir, "rev-parse", "--path-format=absolute", "--git-path", "FETCH_HEAD")
 	}
-	if path, ok := hygGit(dir, "rev-parse", "--path-format=absolute", "--git-path", "FETCH_HEAD"); ok {
-		if info, err := os.Stat(path); err == nil && info.ModTime().Unix() >= 0 {
+	if ok {
+		if info, err := os.Stat(fetchHead); err == nil && info.ModTime().Unix() >= 0 {
 			fetched := info.ModTime().Unix()
 			h.FetchedAt = &fetched
 		}
 	}
-	remotes, ok := hygGit(dir, "remote")
-	hasRemote := ok && remotes != ""
+	// rulesOpen read the remotes.
+	hasRemote := len(repo.remotes) > 0
 	onNoRemote := append([]string{"rev-list", "--count", "--branches", "--not", "--remotes"}, pushing...)
 	if hasRemote {
 		h.Unpushed = hygCount(dir, onNoRemote...)
