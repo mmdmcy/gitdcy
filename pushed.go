@@ -207,3 +207,30 @@ func pushedScan(root, since string, config personalConfig, allowed map[string]bo
 	}
 	return len(commits), findings, next, nil
 }
+
+// pushedFromHere says whether anything was ever pushed from the checkout
+// whose git folder this is: git logs "update by push" on a remote-tracking
+// ref at each push. A clone nobody pushes from (another person's project)
+// has only fetches there, so the commits on its remotes are not ours to
+// read: their authors' addresses are theirs (2026-11-14, a fetch of a cloned
+// project raised "personal data reached a remote").
+func pushedFromHere(gitDir string) bool {
+	if gitDir == "" {
+		return true
+	}
+	found := false
+	_ = filepath.WalkDir(filepath.Join(gitDir, "logs", "refs", "remotes"), func(path string, d os.DirEntry, err error) error {
+		if err != nil || found {
+			return filepath.SkipDir
+		}
+		if d.IsDir() {
+			return nil
+		}
+		if raw, err := os.ReadFile(path); err == nil && strings.Contains(string(raw), "\tupdate by push") {
+			found = true
+			return filepath.SkipAll
+		}
+		return nil
+	})
+	return found
+}

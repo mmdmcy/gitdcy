@@ -48,6 +48,10 @@ type CheckoutScan struct {
 	// Commits that reached a remote since `since`, read for personal data.
 	PushedCommits  int       `json:"pushed_commits"`
 	PushedFindings []Finding `json:"pushed_findings"`
+	// Why its commits on a remote were not read: nothing was ever pushed
+	// from this checkout, so they are someone else's, fetched (a clone of
+	// another person's project); null when they were read.
+	PushedOff *string `json:"pushed_off"`
 	// The reminders; null when they are off for it (hygiene_off says why).
 	Hygiene    *Hygiene `json:"hygiene"`
 	HygieneOff *string  `json:"hygiene_off"`
@@ -240,11 +244,17 @@ func rulesScan(rulesPath string, paths []string, since *string, gitdcy, gh strin
 		found.Remotes = report.Remotes
 		root := report.Repository
 		allowed := personalOwnIdentities(root, config.allow)
-		commits, findings, kept, err := pushedScan(root, sinceText, config, allowed, pushedAgainst(base, allowed), cache.Checkouts[root])
-		if err != nil {
-			found.Detail = "what reached a remote could not be read: " + scanFirstLine(chainText(err))
+		var kept *pushedRead
+		if !pushedFromHere(report.repo.gitDir) {
+			off := "nothing was pushed from this checkout, so what is on its remotes came by fetch, someone else's"
+			found.PushedOff = &off
 		} else {
-			found.PushedCommits, found.PushedFindings = commits, findings
+			commits, findings, read, err := pushedScan(root, sinceText, config, allowed, pushedAgainst(base, allowed), cache.Checkouts[root])
+			if err != nil {
+				found.Detail = "what reached a remote could not be read: " + scanFirstLine(chainText(err))
+			} else {
+				found.PushedCommits, found.PushedFindings, kept = commits, findings, read
+			}
 		}
 		urls := scanURLs(report)
 		if rules == nil {
