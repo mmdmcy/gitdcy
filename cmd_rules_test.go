@@ -968,3 +968,33 @@ func TestRulesCmdAScanReadsAPushedCommitOnceUntilTheRulesOrTheHistoryChange(t *t
 		t.Errorf("only the commits in the window are kept: %+v", cache.Checkouts[root])
 	}
 }
+
+// A clone of another person's project: what its remote holds came by fetch,
+// so its authors' addresses are not personal data that reached a remote from
+// here; once this checkout pushes, its remote's commits are read again.
+func TestRulesCmdAScanLeavesAProjectNobodyPushesFromHereAlone(t *testing.T) {
+	s := newRulesSandbox(t)
+	theirs, _ := s.repo("theirs")
+	s.commit(theirs, "NOTES", "mail "+rulesPrivateAddress()+"\n")
+	s.ok(theirs, "push", "-q", "origin", "main")
+	mine := filepath.Join(s.root, "mine")
+	s.ok(s.root, "clone", "-q", filepath.Join(s.root, "theirs-forge.git"), mine)
+	s.commit(theirs, "MORE", "mail "+rulesPrivateAddress()+" again\n")
+	s.ok(theirs, "push", "-q", "origin", "main")
+	s.ok(mine, "fetch", "-q", "origin")
+
+	v := rulesJSON(t, s.gitdcy(s.root, "rules", "scan", "--format", "json", mine))
+	scan := rulesAt(v, "data", "checkouts", 0)
+	if rulesLen(rulesAt(scan, "pushed_findings")) != 0 || rulesAt(scan, "pushed_off") == nil {
+		t.Fatalf("someone else's fetched commits were read: %v", scan)
+	}
+
+	s.ok(mine, "pull", "-q", "--ff-only", "origin", "main")
+	s.commit(mine, "MINE", "a change of mine\n")
+	s.ok(mine, "push", "-q", "origin", "HEAD:main")
+	v = rulesJSON(t, s.gitdcy(s.root, "rules", "scan", "--format", "json", mine))
+	scan = rulesAt(v, "data", "checkouts", 0)
+	if rulesAt(scan, "pushed_off") != nil || rulesLen(rulesAt(scan, "pushed_findings")) == 0 {
+		t.Fatalf("a checkout that pushes has its remote read: %v", scan)
+	}
+}
