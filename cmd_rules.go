@@ -224,6 +224,9 @@ func rulesPrintReport(r *RulesReport) {
 		allowed = fmt.Sprintf("; %d address(es) allowed", r.AllowedAddresses)
 	}
 	fmt.Printf("  personal-data check: private mail addresses%s%s\n", words, allowed)
+	if len(r.AllowedIdentities) > 0 {
+		fmt.Printf("  identities allowed to author and commit a push: %s\n", strings.Join(r.AllowedIdentities, ", "))
+	}
 	for _, warning := range r.Warnings {
 		fmt.Printf("  ! %s\n", warning)
 	}

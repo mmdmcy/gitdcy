@@ -74,9 +74,13 @@ type ScanReport struct {
 	PullRequestsDetail string `json:"pull_requests_detail,omitempty"`
 	// How many personal words and allowed addresses are read for (the
 	// words are not shown).
-	PersonalWords    int            `json:"personal_words"`
-	AllowedAddresses int            `json:"allowed_addresses"`
-	Checkouts        []CheckoutScan `json:"checkouts"`
+	PersonalWords    int `json:"personal_words"`
+	AllowedAddresses int `json:"allowed_addresses"`
+	// Who may author and commit a push (the rules file's identities; a
+	// [[repo]] may hold its own); empty: no identity check. Read on a
+	// push only, never on what already reached a remote.
+	AllowedIdentities []string       `json:"allowed_identities"`
+	Checkouts         []CheckoutScan `json:"checkouts"`
 }
 
 // scanSinceText is the --since git reads: git reads a bare date as that day
@@ -149,9 +153,11 @@ func rulesScan(rulesPath string, paths []string, since *string, gitdcy, gh strin
 	sinceText := scanSinceText(since)
 	var rules *HygieneRules
 	config := personalConfig{}
+	identities := []string{}
 	if file != nil {
 		rules = file.Hygiene
 		config = personalConfig{words: file.Personal, allow: file.Allow}
+		identities = append(identities, file.Identities...)
 	}
 	reads := scanParallel(paths, func(given string) *scanRead {
 		dir := expandHome(given)
@@ -292,6 +298,7 @@ func rulesScan(rulesPath string, paths []string, since *string, gitdcy, gh strin
 		PullRequestsDetail: detail,
 		PersonalWords:      len(config.words),
 		AllowedAddresses:   len(config.allow),
+		AllowedIdentities:  identities,
 		Checkouts:          checkouts,
 	}, nil
 }

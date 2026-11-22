@@ -345,6 +345,10 @@ selfhosted = ["forge.example.com", "192.0.2.10"]
 personal = ["Jane Doe"]
 allow = []
 
+# Who may author and commit what a push sends: "Name <address>", or an address
+# alone for any name. Without it there is no identity check.
+identities = ["Jane Doe <jane@example.com>"]
+
 [[repo]]
 name = "example-app"
 first_commit = "0123456789abcdef0123456789abcdef01234567"
@@ -352,6 +356,8 @@ remotes = ["ssh://git@forge.example.com:2222/team/example-app.git"]
 push = "selfhosted"     # or "nowhere", "anywhere", or ["github.com/example-org/"]
 protected = ["main"]
 note = "Customer data: it stays on our own forge."
+# This repository's own identities, in place of the list above.
+identities = ["Jane Doe <jane@example.com>", "Sam Roe <sam@example.com>"]
 ```
 
 `git rev-list --max-parents=0 HEAD` shows a repository's first commit. A rule
@@ -377,8 +383,9 @@ gitdcy rules scan                  # every checkout in the workspace against the
 copy of this one repository's rule and the self-hosted host list, so the rule
 holds on a machine without the rules file. When the rules file has a rule for
 the repository it wins, and `gitdcy rules` says when the copy is out of date.
-The copy holds no personal words or allowed addresses; without the rules file
-the check reads for private mail addresses only. An existing pre-push hook is
+The copy holds no personal words, allowed addresses or the file's identities
+(a rule's own identities travel with it); without the rules file the check
+reads for private mail addresses only. An existing pre-push hook is
 moved aside as `pre-push.bak-YYYY-MM-DD` and runs after the check, with the same
 arguments and input. When `core.hooksPath` sends git elsewhere and the hook
 there does not call `.git/hooks/pre-push`, nothing is written and the command
@@ -389,7 +396,15 @@ with the refs on standard input). It refuses a push to a remote or branch the
 rule does not allow, and reads the commits being pushed (added lines, message,
 author and committer) for private mail addresses (gmail, outlook, icloud, ...)
 that are not the repository's own git identity, and for the owner's personal
-words. A refusal names the commit and file and line, shows the value masked,
+words. With `identities` set (in the rule, else at the top of the file), every
+commit's author and committer must be on that list: an address matches in any
+case, a name only where the entry gives one; an address on the list is no
+personal-data finding either. Only what a push sends is read for identities,
+never what already reached a remote (`rules scan`), where other people's
+commits are. An identity refusal names the commit, the field and the
+identity, and gives the line that rewrites the commits from the oldest refused
+one with the identity git is set to (`git rebase -r BASE --exec 'git commit
+--amend --no-edit --reset-author'`). A refusal names the commit and file and line, shows the value masked,
 gives the way forward, and offers no way around it: a refusal is a question for
 the repository's owner. Remote URLs are shown without user, password or port. A
 missing gitdcy refuses the push too, so a rule is never skipped in silence.

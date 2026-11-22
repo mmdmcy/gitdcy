@@ -19,6 +19,11 @@ package main
 //	personal = ["Jane Doe"]
 //	allow = []
 //
+//	# Who may author and commit what a push sends: "Name <address>", or an
+//	# address alone for any name. Not there: no identity check. A [[repo]]'s
+//	# own identities replace this list for that repository.
+//	identities = ["Jane Doe <jane@example.com>"]
+//
 //	# Reminders about work left lying around (scan and the push check); a
 //	# repository whose remote starts with a `skip` prefix keeps its own rules.
 //	[hygiene]
@@ -31,6 +36,7 @@ package main
 //	remotes = ["ssh://git@forge.example.com:2222/team/example-app.git"]
 //	push = "selfhosted"     # or "nowhere", "anywhere", or ["github.com/example-org/"]
 //	protected = ["main"]    # only through a pull request
+//	identities = ["Jane Doe <jane@example.com>", "Sam Roe <sam@example.com>"]
 //	note = "Customer data: it stays on our own forge."
 
 import (
@@ -168,6 +174,9 @@ type RepoRule struct {
 	Protected []string `json:"protected,omitempty"`
 	// The owner's reason, shown with a refusal.
 	Note string `json:"note,omitempty"`
+	// Who may author and commit what is pushed, in place of the rules
+	// file's identities for this repository.
+	Identities []string `json:"identities,omitempty"`
 }
 
 func (*RepoRule) denyUnknownTOML() {}
@@ -175,7 +184,7 @@ func (*RepoRule) denyUnknownTOML() {}
 func (r RepoRule) equal(o RepoRule) bool {
 	sameFirst := (r.FirstCommit == nil) == (o.FirstCommit == nil) && (r.FirstCommit == nil || *r.FirstCommit == *o.FirstCommit)
 	return r.Name == o.Name && sameFirst && rulesSameList(r.Remotes, o.Remotes) && r.Push.equal(o.Push) &&
-		rulesSameList(r.Protected, o.Protected) && r.Note == o.Note
+		rulesSameList(r.Protected, o.Protected) && r.Note == o.Note && rulesSameList(r.Identities, o.Identities)
 }
 
 // RulesFile is the owner's rules file.
@@ -186,6 +195,9 @@ type RulesFile struct {
 	Personal []string `json:"personal,omitempty"`
 	// Private mail addresses that do belong in commits.
 	Allow []string `json:"allow,omitempty"`
+	// Who may author and commit what is pushed ("Name <address>", or an
+	// address for any name); none: no identity check.
+	Identities []string `json:"identities,omitempty"`
 	// Reminders about work left lying around (`gitdcy rules scan`, the push
 	// check): on when this table is there.
 	Hygiene *HygieneRules `json:"hygiene,omitempty"`
@@ -201,7 +213,7 @@ func (f *RulesFile) equal(o *RulesFile) bool {
 	sameHygiene := (f.Hygiene == nil) == (o.Hygiene == nil) &&
 		(f.Hygiene == nil || f.Hygiene.BranchDays == o.Hygiene.BranchDays && rulesSameList(f.Hygiene.Skip, o.Hygiene.Skip))
 	if !sameHygiene || len(f.Repos) != len(o.Repos) || !rulesSameList(f.Selfhosted, o.Selfhosted) ||
-		!rulesSameList(f.Personal, o.Personal) || !rulesSameList(f.Allow, o.Allow) {
+		!rulesSameList(f.Personal, o.Personal) || !rulesSameList(f.Allow, o.Allow) || !rulesSameList(f.Identities, o.Identities) {
 		return false
 	}
 	for i := range f.Repos {
@@ -252,6 +264,9 @@ func (f *RulesFile) validate() error {
 			return err
 		}
 	}
+	if err := identitiesValid("identities", f.Identities); err != nil {
+		return err
+	}
 	names := map[string]bool{}
 	for _, rule := range f.Repos {
 		name := trim(rule.Name)
@@ -275,6 +290,9 @@ func (f *RulesFile) validate() error {
 			if trim(branch) == "" {
 				return errf("rule %s: an empty name in protected", name)
 			}
+		}
+		if err := identitiesValid("rule "+name+": identities", rule.Identities); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -650,10 +668,16 @@ func (f *rulesFound) sourceText() string {
 }
 
 func (f *rulesFound) scanConfig() personalConfig {
-	if f.file == nil {
-		return personalConfig{}
+	config := personalConfig{}
+	if f.file != nil {
+		config = personalConfig{words: f.file.Personal, allow: f.file.Allow, identities: f.file.Identities}
 	}
-	return personalConfig{words: f.file.Personal, allow: f.file.Allow}
+	// A rule's own identities hold for its repository, also from the copy
+	// in its git folder.
+	if f.rule != nil && len(f.rule.Identities) > 0 {
+		config.identities = f.rule.Identities
+	}
+	return config
 }
 
 // expectedCopy is what `install` writes as the copy, when there is a rule.
@@ -863,9 +887,11 @@ type RulesReport struct {
 	Hook       HookState     `json:"hook"`
 	// How many personal words and allowed addresses the check reads (the
 	// words themselves are not shown).
-	PersonalWords    int      `json:"personal_words"`
-	AllowedAddresses int      `json:"allowed_addresses"`
-	Warnings         []string `json:"warnings"`
+	PersonalWords    int `json:"personal_words"`
+	AllowedAddresses int `json:"allowed_addresses"`
+	// Who may author and commit a push; empty: no identity check.
+	AllowedIdentities []string `json:"allowed_identities"`
+	Warnings          []string `json:"warnings"`
 	// What was read of the repository, for the scan.
 	repo *rulesRepo
 }
@@ -935,22 +961,23 @@ func rulesReport(rulesPath, repoPath, gitdcy string) (*RulesReport, error) {
 		remotes = append(remotes, state)
 	}
 	report := &RulesReport{
-		Repository:       found.repo.root,
-		RulesFile:        found.rulesPath,
-		RulesFileFound:   found.file != nil,
-		FirstCommits:     found.repo.firstCommits,
-		Rule:             found.rule,
-		Source:           found.source,
-		MatchedBy:        found.matchedBy,
-		Conflicts:        found.conflicts,
-		Selfhosted:       found.selfhosted,
-		Remotes:          remotes,
-		Copy:             CopyState{Path: found.copyPath, Present: found.copy != nil, Current: copyCurrent},
-		Hook:             hook,
-		PersonalWords:    len(scan.words),
-		AllowedAddresses: len(scan.allow),
-		Warnings:         warnings,
-		repo:             found.repo,
+		Repository:        found.repo.root,
+		RulesFile:         found.rulesPath,
+		RulesFileFound:    found.file != nil,
+		FirstCommits:      found.repo.firstCommits,
+		Rule:              found.rule,
+		Source:            found.source,
+		MatchedBy:         found.matchedBy,
+		Conflicts:         found.conflicts,
+		Selfhosted:        found.selfhosted,
+		Remotes:           remotes,
+		Copy:              CopyState{Path: found.copyPath, Present: found.copy != nil, Current: copyCurrent},
+		Hook:              hook,
+		PersonalWords:     len(scan.words),
+		AllowedAddresses:  len(scan.allow),
+		AllowedIdentities: append([]string{}, scan.identities...),
+		Warnings:          warnings,
+		repo:              found.repo,
 	}
 	if found.rule != nil {
 		push := found.rule.Push.describe(found.selfhosted)
@@ -1189,6 +1216,18 @@ func rulesOnNoRemote(local string) []string {
 	return []string{local, "--not", "--remotes"}
 }
 
+// rulesIdentityReason is the refusal of n authors or committers the rules
+// do not allow, with the line that gives every commit from the oldest one
+// on the identity git is set to here.
+func rulesIdentityReason(root string, n int, oldest string, allowed []string, source string) string {
+	base := "--root"
+	if _, err := gitOutput(root, "rev-parse", "-q", "--verify", oldest+"^"); err == nil {
+		base = oldest + "^"
+	}
+	return fmt.Sprintf("The commits being pushed have %d author or committer identity(ies) the rules do not allow, listed above; allowed: %s. Set git to an allowed identity (git config user.name, git config user.email), then give those commits that identity: git rebase -r %s --exec 'git commit --amend --no-edit --reset-author' and push again. Who may author commits here is the owner's decision; its place is identities in %s.",
+		n, strings.Join(allowed, ", "), base, source)
+}
+
 func rulesCheck(rulesPath, repoPath string, request CheckRequest) (*CheckReport, error) {
 	found, err := rulesFind(rulesPath, repoPath)
 	if err != nil {
@@ -1306,8 +1345,22 @@ func rulesCheck(rulesPath, repoPath string, request CheckRequest) (*CheckReport,
 			reasons = append(reasons, fmt.Sprintf("Branch %s of \"%s\" takes no direct push: it is reached only through a pull request. Push a branch of your own (git push %s HEAD:refs/heads/NEW-BRANCH) and open a pull request into %s.", branch, rule.Name, remote, branch))
 		}
 	}
-	if len(findings) > 0 {
-		reasons = append(reasons, fmt.Sprintf("The commits being pushed hold personal data in %d place(s), listed above. Take it out of those commits (git commit --amend for the last one, git rebase for older ones) and push again. Whether an address belongs in this repository is the owner's decision; its place is the allow list in the rules file.", len(findings)))
+	personal, oldestIdentity, identities := 0, "", 0
+	for _, f := range findings {
+		if f.Kind != findingIdentity {
+			personal++
+			continue
+		}
+		// Findings come in git log's order, newest first: the last is the
+		// oldest commit to rewrite.
+		identities++
+		oldestIdentity = f.Commit
+	}
+	if personal > 0 {
+		reasons = append(reasons, fmt.Sprintf("The commits being pushed hold personal data in %d place(s), listed above. Take it out of those commits (git commit --amend for the last one, git rebase for older ones) and push again. Whether an address belongs in this repository is the owner's decision; its place is the allow list in the rules file.", personal))
+	}
+	if identities > 0 {
+		reasons = append(reasons, rulesIdentityReason(repo.root, identities, oldestIdentity, scan.identities, found.sourceText()))
 	}
 	refused := len(reasons) > 0
 	if refused {

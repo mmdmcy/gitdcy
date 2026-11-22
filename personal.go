@@ -8,7 +8,10 @@ package main
 //   - consumer mail addresses (gmail, hotmail, outlook, icloud, ...) that are
 //     not one of the repository's own git identities or on the owner's allow
 //     list;
-//   - the owner's own words (names, phone numbers), from the rules file.
+//   - the owner's own words (names, phone numbers), from the rules file;
+//   - an author or committer the rules file's identities do not list, when
+//     it lists any (the push check only: a scan of what already reached a
+//     remote reads other people's commits too).
 //
 // The detectors here are generic; the words and the allow list are the
 // owner's, read from their private rules file, never from a repository. A
@@ -40,11 +43,15 @@ type FindingKind string
 const (
 	findingConsumerAddress FindingKind = "consumer-address"
 	findingPersonalWord    FindingKind = "personal-word"
+	findingIdentity        FindingKind = "identity"
 )
 
 func (k FindingKind) label() string {
-	if k == findingConsumerAddress {
+	switch k {
+	case findingConsumerAddress:
 		return "a private mail address"
+	case findingIdentity:
+		return "an identity the rules do not allow"
 	}
 	return "a word from the personal list"
 }
@@ -65,6 +72,54 @@ type Finding struct {
 type personalConfig struct {
 	words []string
 	allow []string
+	// Who may author and commit; none: no identity check.
+	identities []string
+}
+
+// identityParts splits "Name <address>" (or an address alone, with or
+// without <>) into its name and its address.
+func identityParts(text string) (name, address string) {
+	text = trim(text)
+	if open := strings.LastIndex(text, "<"); open >= 0 && strings.HasSuffix(text, ">") {
+		return trim(text[:open]), trim(text[open+1 : len(text)-1])
+	}
+	return "", text
+}
+
+// identitiesValid refuses an entry with no address: it would allow nobody.
+func identitiesValid(where string, list []string) error {
+	for _, entry := range list {
+		if _, address := identityParts(entry); address == "" {
+			return errf("%s: \"%s\" has no address; write \"Name <address>\", or the address alone for any name", where, entry)
+		}
+	}
+	return nil
+}
+
+// identityAllowed reports whether the identity git shows ("Name <address>")
+// is on the list: its address (any case) and, where the entry names one,
+// its name exactly.
+func identityAllowed(identity string, list []string) bool {
+	name, address := identityParts(identity)
+	for _, entry := range list {
+		n, a := identityParts(entry)
+		if strings.EqualFold(a, address) && (n == "" || n == name) {
+			return true
+		}
+	}
+	return false
+}
+
+// identityShown is the identity as a refusal names it: as git has it, its
+// address masked when it is a private one.
+func identityShown(identity string) string {
+	name, address := identityParts(identity)
+	for _, f := range personalIn(address, nil, map[string]bool{}) {
+		if f.kind == findingConsumerAddress {
+			return name + " <" + f.shown + ">"
+		}
+	}
+	return trim(identity)
 }
 
 // personalFound is one thing found on a line: its kind and how it is shown.
@@ -227,6 +282,13 @@ func personalLog(repo string, revs []string, stdin string, config personalConfig
 		}
 		note("author", parts[2])
 		note("committer", parts[3])
+		if len(config.identities) > 0 {
+			for i, place := range []string{"author", "committer"} {
+				if !identityAllowed(parts[2+i], config.identities) {
+					c.findings = append(c.findings, Finding{Commit: c.short, Place: place, Kind: findingIdentity, Shown: identityShown(parts[2+i])})
+				}
+			}
+		}
 		note("message", parts[4])
 		path := ""
 		lineNo := uint64(0)
@@ -254,7 +316,13 @@ func personalLog(repo string, revs []string, stdin string, config personalConfig
 // personalScanCommits reads the commits in rng (git log syntax) for
 // personal data; it returns how many commits were read and what was found.
 func personalScanCommits(repo string, rng []string, config personalConfig) (int, []Finding, error) {
-	commits, err := personalLog(repo, rng, "", config, personalOwnIdentities(repo, config.allow))
+	// An identity allowed to author is no personal data in a commit either.
+	allow := append([]string{}, config.allow...)
+	for _, entry := range config.identities {
+		_, address := identityParts(entry)
+		allow = append(allow, address)
+	}
+	commits, err := personalLog(repo, rng, "", config, personalOwnIdentities(repo, allow))
 	if err != nil {
 		return 0, nil, err
 	}

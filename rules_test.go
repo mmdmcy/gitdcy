@@ -185,7 +185,7 @@ func TestRulesARulesFileWithMistakesIsRefused(t *testing.T) {
 func TestRulesTOMLMistakesAreShownAsTheTomlCrateShowedThem(t *testing.T) {
 	for text, want := range map[string]string{
 		"zzz = 1\naaa = 2\n": "TOML parse error at line 2, column 1\n  |\n2 | aaa = 2\n  | ^^^\n" +
-			"unknown field `aaa`, expected one of `selfhosted`, `personal`, `allow`, `hygiene`, `repo`\n",
+			"unknown field `aaa`, expected one of `selfhosted`, `personal`, `allow`, `identities`, `hygiene`, `repo`\n",
 		"[[repo]]\nname = \"a\"\nremotes = [\"x/y\"]\npush = \"github\"\nfirst_commit = \"abc\"\nprotected = 5\n": "TOML parse error at line 6, column 13\n  |\n6 | protected = 5\n  |             ^\n" +
 			"invalid type: integer `5`, expected a sequence\n",
 		"hygiene.days = 3\n": "TOML parse error at line 1, column 9\n  |\n1 | hygiene.days = 3\n  |         ^^^^\n" +
