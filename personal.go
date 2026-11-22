@@ -20,6 +20,7 @@ package main
 // refusal does not print the data it refuses.
 
 import (
+	"path/filepath"
 	"strconv"
 	"strings"
 	"unicode"
@@ -77,6 +78,34 @@ type personalConfig struct {
 	allow []string
 	// Who may author and commit; none: no identity check.
 	identities []string
+	// The rules file in use, as a path in the repository being read
+	// ("/"-separated); "" when it is outside it. Its lines are not read for
+	// the personal words, which it lists itself: the commit that adds a
+	// word would be refused for that word.
+	rulesFile string
+}
+
+// personalRulesFile is the rules file at rulesPath as a path inside the
+// repository at root, both resolved (links followed, absolute); "" when it
+// is not inside it.
+func personalRulesFile(rulesPath, root string) string {
+	resolve := func(path string) string {
+		if abs, err := filepath.Abs(path); err == nil {
+			path = abs
+		}
+		if real, err := filepath.EvalSymlinks(path); err == nil {
+			path = real
+		}
+		return path
+	}
+	if rulesPath == "" || root == "" {
+		return ""
+	}
+	rel, err := filepath.Rel(resolve(root), resolve(rulesPath))
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return ""
+	}
+	return filepath.ToSlash(rel)
 }
 
 // identityParts splits "Name <address>" (or an address alone, with or
@@ -279,8 +308,14 @@ func personalLog(repo string, revs []string, stdin string, config personalConfig
 		}
 		c := personalCommit{id: parts[0], short: parts[1]}
 		diff := parts[5]
+		// The file the diff is at; "" for the author, committer and message.
+		path := ""
 		note := func(place, text string) {
-			for _, f := range personalIn(text, config.words, allowed) {
+			words := config.words
+			if path != "" && path == config.rulesFile {
+				words = nil
+			}
+			for _, f := range personalIn(text, words, allowed) {
 				c.findings = append(c.findings, Finding{Commit: c.short, Place: place, Kind: f.kind, Shown: f.shown})
 			}
 		}
@@ -305,7 +340,6 @@ func personalLog(repo string, revs []string, stdin string, config personalConfig
 			key("message", line)
 		}
 		pem = secretPEM{}
-		path := ""
 		lineNo := uint64(0)
 		for _, line := range lines(diff) {
 			if file, ok := strings.CutPrefix(line, "+++ b/"); ok {

@@ -396,7 +396,9 @@ with the refs on standard input). It refuses a push to a remote or branch the
 rule does not allow, and reads the commits being pushed (added lines, message,
 author and committer) for private mail addresses (gmail, outlook, icloud, ...)
 that are not the repository's own git identity, and for the owner's personal
-words. With `identities` set (in the rule, else at the top of the file), every
+words. The rules file in use, when it lies inside the repository being checked
+(compared by its resolved path), is not read for those words, which it lists
+itself; it is still read for addresses and tokens. With `identities` set (in the rule, else at the top of the file), every
 commit's author and committer must be on that list: an address matches in any
 case, a name only where the entry gives one; an address on the list is no
 personal-data finding either. Only what a push sends is read for identities,

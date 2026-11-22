@@ -211,3 +211,40 @@ func TestRulesCmdAScanReportsATokenThatReachedARemote(t *testing.T) {
 		t.Error("the token is shown")
 	}
 }
+
+// The rules file lists the personal words itself: the commit that adds one
+// to it is not refused for that word. The word elsewhere, and a token in the
+// rules file, still are.
+func TestRulesCmdTheRulesFileInTheRepositoryIsNotReadForItsOwnWords(t *testing.T) {
+	s := newRulesSandbox(t)
+	fleet, _ := s.repo("fleet")
+	s.rules("personal = []\n")
+	s.ok(fleet, "add", "repos.toml")
+	s.ok(fleet, "commit", "-qm", "rules")
+	s.ok(fleet, "push", "-q", "origin", "main")
+	s.ok(fleet, "branch", "-q", "--set-upstream-to=origin/main")
+
+	s.rules("personal = [\"Jane Doe\"]\n")
+	s.ok(fleet, "commit", "-qam", "a personal word")
+	if out := s.gitdcy(fleet, "rules", "check"); out.code != 0 {
+		t.Fatalf("adding a word to the rules file passes: %s", out.text())
+	}
+	s.ok(fleet, "push", "-q", "origin", "main")
+	out := s.gitdcy(s.root, "rules", "scan", "--format", "json", fleet)
+	if rulesLen(rulesAt(rulesJSON(t, out), "data", "checkouts", 0, "pushed_findings")) != 0 {
+		t.Errorf("a scan does not read the rules file for its words: %s", out.text())
+	}
+
+	s.commit(fleet, "notes.txt", "met jane doe today\n")
+	if out := s.gitdcy(fleet, "rules", "check"); out.code != 1 || !strings.Contains(out.text(), "notes.txt:1: a word from the personal list") {
+		t.Fatalf("the word in another file is refused: %s", out.text())
+	}
+
+	s.ok(fleet, "reset", "-q", "--hard", "HEAD~1")
+	token := secretJoin("gh", "p_", secretFill(secretAlnum, 36))
+	s.rules("personal = [\"Jane Doe\"]\n# " + token + "\n")
+	s.ok(fleet, "commit", "-qam", "a token")
+	if out := s.gitdcy(fleet, "rules", "check"); out.code != 1 || !strings.Contains(out.text(), "repos.toml:2: a token or private key (GitHub token") {
+		t.Fatalf("a token in the rules file is refused: %s", out.text())
+	}
+}

@@ -677,6 +677,9 @@ func (f *rulesFound) scanConfig() personalConfig {
 	if f.rule != nil && len(f.rule.Identities) > 0 {
 		config.identities = f.rule.Identities
 	}
+	if f.file != nil {
+		config.rulesFile = personalRulesFile(f.rulesPath, f.repo.root)
+	}
 	return config
 }
 

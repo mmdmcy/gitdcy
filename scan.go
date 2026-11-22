@@ -249,6 +249,8 @@ func rulesScan(rulesPath string, paths []string, since *string, gitdcy, gh strin
 		}
 		found.Remotes = report.Remotes
 		root := report.Repository
+		config := config
+		config.rulesFile = personalRulesFile(rulesPath, root)
 		allowed := personalOwnIdentities(root, config.allow)
 		var kept *pushedRead
 		if !pushedFromHere(report.repo.gitDir) {
