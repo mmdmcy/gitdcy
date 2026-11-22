@@ -415,6 +415,29 @@ With `--format json` the result is the `gitdcy.response.v1` envelope
 included; a refusal is `data.refused = true` with one line per reason in
 `data.reasons`.
 
+### Tokens and private keys
+
+The same read refuses credentials in the added lines and the message
+(finding kind `token`): Supabase (`sbp_`, `sb_secret_`), GitHub (`ghp_`,
+`gho_`, `ghu_`, `ghs_`, `ghr_`, `github_pat_`), Anthropic (`sk-ant-`), OpenAI
+(`sk-proj-`, `sk-svcacct-`, `sk-admin-`, and `sk-` with 48 letters and
+digits), DeepSeek (`sk-` with 32 hex), AWS access key ids (`AKIA`, `ASIA`),
+Google API keys (`AIza`), Stripe live keys (`sk_live_`, `rk_live_`; test keys
+pass), Slack (`xoxa-`, `xoxb-`, `xoxp-`, `xoxr-`), Hugging Face (`hf_`) and PEM
+private keys (a `BEGIN ... PRIVATE KEY` header followed by a line of the key).
+Only these prefixed formats are looked for, each with its length and a word
+boundary on both sides; a placeholder (`xxxx`, `EXAMPLE`) is no token. A
+finding shows the first six characters and the length, never the value.
+`rules scan` reports them in what already reached a remote, the same way.
+
+What to do: first rotate the token at its provider (revoke it, make a new
+one), because it is exposed the moment it is pushed, and one in a pushed
+commit is exposed already. Then take it out of the commit (`git commit
+--amend`, or the `git rebase -i` line the refusal gives for older commits),
+and keep secrets in a file git ignores or in a vault. No `allow` entry passes
+a token. A test that needs a token-shaped value builds it at run time
+(`"sk_" + "live_" + ...`), so the source holds none.
+
 ### Every checkout at once
 
 `gitdcy rules scan [PATH...] [--since DATE]` reads every checkout in the

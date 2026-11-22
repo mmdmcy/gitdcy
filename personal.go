@@ -3,12 +3,13 @@ package main
 // The personal-data check on what a push sends.
 //
 // Every commit that would leave is read: its added lines, its message, and
-// its author and committer. Two things are found:
+// its author and committer. These are found:
 //
 //   - consumer mail addresses (gmail, hotmail, outlook, icloud, ...) that are
 //     not one of the repository's own git identities or on the owner's allow
 //     list;
 //   - the owner's own words (names, phone numbers), from the rules file;
+//   - tokens and private keys of the formats in secrets.go, never allowed;
 //   - an author or committer the rules file's identities do not list, when
 //     it lists any (the push check only: a scan of what already reached a
 //     remote reads other people's commits too).
@@ -52,6 +53,8 @@ func (k FindingKind) label() string {
 		return "a private mail address"
 	case findingIdentity:
 		return "an identity the rules do not allow"
+	case findingToken:
+		return "a token or private key"
 	}
 	return "a word from the personal list"
 }
@@ -171,7 +174,7 @@ func personalAddressAt(line string, at int) (string, bool) {
 }
 
 // personalIn is everything personal in one line: consumer mail addresses
-// not in allowed and the configured words, each once, masked.
+// not in allowed, the configured words and tokens, each once, masked.
 func personalIn(line string, words []string, allowed map[string]bool) []personalFound {
 	var seen []string
 	var out []personalFound
@@ -197,7 +200,8 @@ func personalIn(line string, words []string, allowed map[string]bool) []personal
 			seen = append(seen, word)
 		}
 	}
-	return out
+	// Tokens are never on the allow list: one found is always refused.
+	return append(out, secretsIn(line)...)
 }
 
 // personalOwnIdentities is the allow list plus the repository's own git
@@ -290,12 +294,25 @@ func personalLog(repo string, revs []string, stdin string, config personalConfig
 			}
 		}
 		note("message", parts[4])
+		// A key file's header and the line after it.
+		var pem secretPEM
+		key := func(place, line string) {
+			if at, f, ok := pem.next(place, line); ok {
+				c.findings = append(c.findings, Finding{Commit: c.short, Place: at, Kind: f.kind, Shown: f.shown})
+			}
+		}
+		for _, line := range lines(parts[4]) {
+			key("message", line)
+		}
+		pem = secretPEM{}
 		path := ""
 		lineNo := uint64(0)
 		for _, line := range lines(diff) {
 			if file, ok := strings.CutPrefix(line, "+++ b/"); ok {
 				path = file
+				pem = secretPEM{}
 			} else if hunk, ok := strings.CutPrefix(line, "@@ "); ok {
+				pem = secretPEM{}
 				lineNo = 0
 				if fields := strings.Fields(hunk); len(fields) > 1 {
 					number, _, _ := strings.Cut(strings.TrimLeft(fields[1], "+"), ",")
@@ -304,7 +321,9 @@ func personalLog(repo string, revs []string, stdin string, config personalConfig
 					}
 				}
 			} else if added, ok := strings.CutPrefix(line, "+"); ok && !strings.HasPrefix(line, "+++") {
-				note(path+":"+strconv.FormatUint(lineNo, 10), added)
+				place := path + ":" + strconv.FormatUint(lineNo, 10)
+				note(place, added)
+				key(place, added)
 				lineNo++
 			}
 		}

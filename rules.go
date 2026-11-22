@@ -1219,11 +1219,24 @@ func rulesOnNoRemote(local string) []string {
 // rulesIdentityReason is the refusal of n authors or committers the rules
 // do not allow, with the line that gives every commit from the oldest one
 // on the identity git is set to here.
-func rulesIdentityReason(root string, n int, oldest string, allowed []string, source string) string {
-	base := "--root"
+// rulesRebaseBase is what a rebase that rewrites oldest starts from: its
+// parent, or --root for a first commit.
+func rulesRebaseBase(root, oldest string) string {
 	if _, err := gitOutput(root, "rev-parse", "-q", "--verify", oldest+"^"); err == nil {
-		base = oldest + "^"
+		return oldest + "^"
 	}
+	return "--root"
+}
+
+// rulesTokenReason is what to do about tokens in the commits being pushed:
+// rotate first, then take them out. No allow list passes a token.
+func rulesTokenReason(root string, n int, oldest string) string {
+	return fmt.Sprintf("The commits being pushed hold %d token(s) or private key(s), listed above. First rotate each one at its provider (revoke it and make a new one): a credential is exposed the moment it is pushed, and one pushed before is exposed already. Then take it out of those commits (git commit --amend for the last one; for older ones git rebase -i %s, marking those commits edit) and push again. Keep secrets in a file git ignores or in a vault, never in a commit. No allow list passes a token.",
+		n, rulesRebaseBase(root, oldest))
+}
+
+func rulesIdentityReason(root string, n int, oldest string, allowed []string, source string) string {
+	base := rulesRebaseBase(root, oldest)
 	return fmt.Sprintf("The commits being pushed have %d author or committer identity(ies) the rules do not allow, listed above; allowed: %s. Set git to an allowed identity (git config user.name, git config user.email), then give those commits that identity: git rebase -r %s --exec 'git commit --amend --no-edit --reset-author' and push again. Who may author commits here is the owner's decision; its place is identities in %s.",
 		n, strings.Join(allowed, ", "), base, source)
 }
@@ -1345,16 +1358,23 @@ func rulesCheck(rulesPath, repoPath string, request CheckRequest) (*CheckReport,
 			reasons = append(reasons, fmt.Sprintf("Branch %s of \"%s\" takes no direct push: it is reached only through a pull request. Push a branch of your own (git push %s HEAD:refs/heads/NEW-BRANCH) and open a pull request into %s.", branch, rule.Name, remote, branch))
 		}
 	}
-	personal, oldestIdentity, identities := 0, "", 0
+	// Findings come in git log's order, newest first: the last of a kind is
+	// the oldest commit to rewrite.
+	personal, oldestIdentity, identities, oldestToken, tokens := 0, "", 0, "", 0
 	for _, f := range findings {
-		if f.Kind != findingIdentity {
+		switch f.Kind {
+		case findingIdentity:
+			identities++
+			oldestIdentity = f.Commit
+		case findingToken:
+			tokens++
+			oldestToken = f.Commit
+		default:
 			personal++
-			continue
 		}
-		// Findings come in git log's order, newest first: the last is the
-		// oldest commit to rewrite.
-		identities++
-		oldestIdentity = f.Commit
+	}
+	if tokens > 0 {
+		reasons = append(reasons, rulesTokenReason(repo.root, tokens, oldestToken))
 	}
 	if personal > 0 {
 		reasons = append(reasons, fmt.Sprintf("The commits being pushed hold personal data in %d place(s), listed above. Take it out of those commits (git commit --amend for the last one, git rebase for older ones) and push again. Whether an address belongs in this repository is the owner's decision; its place is the allow list in the rules file.", personal))
