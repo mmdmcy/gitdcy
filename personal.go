@@ -27,6 +27,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"unicode"
 	"unicode/utf8"
 )
@@ -98,26 +99,84 @@ type personalConfig struct {
 }
 
 // personalRulesFile is the rules file at rulesPath as a path inside the
-// repository at root, both resolved (links followed, absolute); "" when it
-// is not inside it.
+// repository at root, both resolved (links followed, absolute); in another
+// checkout of the rules file's own repository (a worktree of it, or a clone
+// with the same origin), the same path there; "" else. Copies of the rules
+// repository list the same words: they were flagged for them while the
+// checkout the rules are read from was not.
 func personalRulesFile(rulesPath, root string) string {
-	resolve := func(path string) string {
-		if abs, err := filepath.Abs(path); err == nil {
-			path = abs
-		}
-		if real, err := filepath.EvalSymlinks(path); err == nil {
-			path = real
-		}
-		return path
-	}
 	if rulesPath == "" || root == "" {
 		return ""
 	}
-	rel, err := filepath.Rel(resolve(root), resolve(rulesPath))
-	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+	rulesPath, root = personalResolve(rulesPath), personalResolve(root)
+	if rel, ok := personalInside(root, rulesPath); ok {
+		return rel
+	}
+	home := personalRulesHome(rulesPath)
+	if home.rel == "" {
 		return ""
 	}
-	return filepath.ToSlash(rel)
+	if common, err := gitOutput(root, "rev-parse", "--path-format=absolute", "--git-common-dir"); err == nil &&
+		home.commonDir != "" && personalResolve(rulesAbsolute(root, common)) == home.commonDir {
+		return home.rel
+	}
+	if origin, err := gitOutput(root, "remote", "get-url", "origin"); err == nil &&
+		home.origin != "" && trim(origin) == home.origin {
+		return home.rel
+	}
+	return ""
+}
+
+// personalResolve is path absolute, links followed.
+func personalResolve(path string) string {
+	if abs, err := filepath.Abs(path); err == nil {
+		path = abs
+	}
+	if real, err := filepath.EvalSymlinks(path); err == nil {
+		path = real
+	}
+	return path
+}
+
+// personalInside is path as a "/"-separated path inside root; false when
+// it is not inside it.
+func personalInside(root, path string) (string, bool) {
+	rel, err := filepath.Rel(root, path)
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return "", false
+	}
+	return filepath.ToSlash(rel), true
+}
+
+// personalRulesRepo is the repository holding the rules file: the file's
+// place in it, its git folder shared by its worktrees, and its origin.
+type personalRulesRepo struct{ rel, commonDir, origin string }
+
+// personalRulesRepos keeps each rules file's repository, read once per run
+// (a scan asks for every checkout).
+var personalRulesRepos sync.Map
+
+// personalRulesHome is the repository of the rules file at rulesPath
+// (resolved); rel is "" when the file is in none.
+func personalRulesHome(rulesPath string) personalRulesRepo {
+	if kept, ok := personalRulesRepos.Load(rulesPath); ok {
+		return kept.(personalRulesRepo)
+	}
+	var home personalRulesRepo
+	dir := filepath.Dir(rulesPath)
+	if top, err := gitOutput(dir, "rev-parse", "--show-toplevel"); err == nil && trim(top) != "" {
+		if rel, ok := personalInside(personalResolve(trim(top)), rulesPath); ok {
+			home.rel = rel
+			if common, err := gitOutput(dir, "rev-parse", "--path-format=absolute", "--git-common-dir"); err == nil {
+				home.commonDir = personalResolve(rulesAbsolute(dir, common))
+			}
+			if origin, err := gitOutput(dir, "remote", "get-url", "origin"); err == nil {
+				home.origin = trim(origin)
+			}
+		}
+	}
+	personalRulesRepos.Store(rulesPath, home)
+	return home
 }
 
 // identityParts splits "Name <address>" (or an address alone, with or

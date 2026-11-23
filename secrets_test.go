@@ -248,3 +248,46 @@ func TestRulesCmdTheRulesFileInTheRepositoryIsNotReadForItsOwnWords(t *testing.T
 		t.Fatalf("a token in the rules file is refused: %s", out.text())
 	}
 }
+
+// A worktree or a clone of the rules file's repository holds its own copy
+// of the rules file, with the same words: that copy is not read for them
+// either. The same file in another repository, and the word in another file
+// of the copy, still are.
+func TestRulesCmdACopyOfTheRulesRepositoryIsNotReadForItsOwnWords(t *testing.T) {
+	s := newRulesSandbox(t)
+	fleet, _ := s.repo("fleet")
+	s.rules("personal = []\n")
+	s.ok(fleet, "add", "repos.toml")
+	s.ok(fleet, "commit", "-qm", "rules")
+	s.ok(fleet, "push", "-q", "origin", "main")
+	s.rules("personal = [\"Jane Doe\"]\n")
+
+	worktree := filepath.Join(s.root, "fleet-branch")
+	s.ok(fleet, "worktree", "add", "-q", "-b", "branch", worktree)
+	clone := filepath.Join(s.root, "fleet-clone")
+	s.ok(s.root, "clone", "-q", filepath.Join(s.root, "fleet-forge.git"), clone)
+	s.ok(clone, "checkout", "-q", "-b", "cloned")
+	for _, copy := range []string{worktree, clone} {
+		branch := s.ok(copy, "branch", "--show-current")
+		rulesWrite(t, filepath.Join(copy, "repos.toml"), "personal = [\"Jane Doe\"]\n")
+		s.ok(copy, "commit", "-qam", "a personal word")
+		if out := s.gitdcy(copy, "rules", "check"); out.code != 0 {
+			t.Fatalf("%s: the copy's rules file passes: %s", branch, out.text())
+		}
+		s.ok(copy, "push", "-q", "-u", "origin", branch)
+		out := s.gitdcy(s.root, "rules", "scan", "--format", "json", copy)
+		if rulesLen(rulesAt(rulesJSON(t, out), "data", "checkouts", 0, "pushed_findings")) != 0 {
+			t.Errorf("%s: a scan does not read the copy's rules file for its words: %s", branch, out.text())
+		}
+		s.commit(copy, "notes.txt", "met jane doe today\n")
+		if out := s.gitdcy(copy, "rules", "check"); out.code != 1 || !strings.Contains(out.text(), "notes.txt:1: a word from the personal list") {
+			t.Fatalf("%s: the word in another file of the copy is refused: %s", branch, out.text())
+		}
+	}
+
+	other, _ := s.repo("other")
+	s.commit(other, "repos.toml", "personal = [\"Jane Doe\"]\n")
+	if out := s.gitdcy(other, "rules", "check"); out.code != 1 || !strings.Contains(out.text(), "repos.toml:1: a word from the personal list") {
+		t.Fatalf("a repos.toml in another repository is refused: %s", out.text())
+	}
+}
