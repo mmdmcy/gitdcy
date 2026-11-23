@@ -524,11 +524,16 @@ what the last fetch knew, for a view that refreshes often.
 behind with no local changes (untracked files included) and no local commits.
 It never makes a merge commit, rebases, forces, or touches local changes; a
 checkout that cannot be fast-forwarded is reported and left as it is.
+`--rules` takes, in place of a path, the checkout that holds the rules file in
+use (found as `gitdcy rules` finds it), so a daily job can keep every device's
+push check on the current rules wherever they live; with no rules file, or one
+in no git checkout, it says so and succeeds.
 
 ```bash
 gitdcy checkouts
 gitdcy checkouts ~/code/app ~/code/lib --format json
 gitdcy checkouts update ~/code/app
+gitdcy checkouts update --rules
 ```
 
 A path is used as given and reported the same way, so a caller can match its

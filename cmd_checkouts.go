@@ -6,6 +6,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -24,6 +25,7 @@ func checkoutsCommand() *cliCmd {
   gitdcy checkouts --no-fetch --format json
   gitdcy checkouts --no-fetch --facts --format json /abs/repo
   gitdcy checkouts update ~/code/app       fast-forward it if that is safe
+  gitdcy checkouts update --rules          the checkout holding the rules file in use
 
 States: current, behind, ahead, diverged, changed (local changes only),
 missing, no-upstream, error. update fast-forwards only a checkout that is
@@ -35,7 +37,13 @@ fsmonitor; only the fetch and update's fast-forward run git as configured.
 --facts adds what a tool moving the checkout to another device needs, as
 `+"`facts`"+` in the JSON: the full head id, stash ids, commits on no remote,
 notable ignored files by name, fingerprints of the local changes and the
-working tree's id (computed without writing to the repository).`).
+working tree's id (computed without writing to the repository).
+
+--rules takes the checkout that holds the rules file in use (as `+"`gitdcy rules`"+`
+finds it: rules_file in local.toml, else rules.toml in the config folder)
+in place of PATH, so a daily job keeps the push check's rules current
+wherever they live; with no rules file, or one in no git checkout, it says
+so and succeeds.`).
 		Sub(newCmd("update").
 			About("Fast-forward the checkouts that are behind and have no local changes or commits").
 			Arg(paths().Help("Checkouts to update (default: every repository in the workspace)"))).
@@ -43,6 +51,7 @@ working tree's id (computed without writing to the repository).`).
 			paths().Help("Checkouts to read (default: every repository in the workspace)"),
 			flag("no_fetch", "no-fetch").Help("Do not fetch first: show what the last fetch knew"),
 			flag("facts", "facts").Help("Also report what moving each checkout needs (slower: hashes local changes)"),
+			flag("rules", "rules").Help("The checkout holding the rules file in use, in place of PATH"),
 			formatArg().Global(),
 		)
 }
@@ -56,6 +65,22 @@ func runCheckouts(m *cliMatches) error {
 	}
 	options := checkoutsOptions{fetch: !m.flag("no_fetch"), update: update, facts: m.flag("facts")}
 	var report checkoutsCommandReport
+	if m.flag("rules") {
+		if len(paths) > 0 {
+			return errf("--rules takes no PATH: it is the checkout holding the rules file in use")
+		}
+		dir, none := rulesCheckout()
+		if dir == "" {
+			report.Checkouts = []checkoutsCheckout{}
+			if isJSON(m) {
+				printJSON(operation, report, nil, []string{none})
+			} else {
+				fmt.Println(none)
+			}
+			return nil
+		}
+		paths = []string{dir}
+	}
 	paths, err := givenOrWorkspace(paths)
 	if err == nil {
 		report.Checkouts = checkoutsRead(paths, options)
@@ -76,6 +101,26 @@ func runCheckouts(m *cliMatches) error {
 	}
 	checkoutsPrintHuman(report.Checkouts)
 	return nil
+}
+
+// rulesCheckout is the checkout that holds the rules file in use (a link
+// followed), or why there is none: no rules file, or one in no git checkout.
+func rulesCheckout() (string, string) {
+	file, err := rulesFilePath(nil)
+	if err != nil {
+		return "", fmt.Sprintf("no rules file: %v", err)
+	}
+	if _, err := os.Stat(file); err != nil {
+		return "", fmt.Sprintf("no rules file at %s: nothing to bring current", file)
+	}
+	if real, err := filepath.EvalSymlinks(file); err == nil {
+		file = real
+	}
+	top, err := gitOutput(filepath.Dir(file), "rev-parse", "--show-toplevel")
+	if top = strings.TrimSpace(top); err != nil || top == "" {
+		return "", fmt.Sprintf("the rules file %s is in no git checkout: nothing to bring current", file)
+	}
+	return filepath.FromSlash(top), ""
 }
 
 // checkoutsWarnings is what could not be read as asked.

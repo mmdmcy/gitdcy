@@ -320,3 +320,56 @@ func TestCheckoutsMissingPathsBranchesWithoutUpstreamAndFailedFetchesAreSaidPlai
 		t.Fatal(said)
 	}
 }
+
+// --rules is the checkout holding the rules file in use, wherever it is: a
+// daily job keeps the push check's rules current with it (2026-11-23, two
+// devices had checked pushes against a copy hundreds of commits old).
+func TestCheckoutsRulesUpdatesTheCheckoutHoldingTheRulesFile(t *testing.T) {
+	s := newCheckoutsSandbox(t)
+	seed, clones := s.upstream(1)
+	s.commit(seed, "repos.toml", "# rules\n")
+	s.ok(seed, "push", "-q")
+	s.ok(clones[0], "pull", "-q")
+	s.commit(seed, "repos.toml", "# rules, newer\n")
+	s.ok(seed, "push", "-q")
+	local := filepath.Join(s.home(), ".config/gitdcy/local.toml")
+
+	// No rules file yet: nothing to bring current, and no failure.
+	out, errText, ok := s.gitdcy("checkouts", "update", "--rules")
+	if !ok || !strings.Contains(out, "no rules file at") {
+		t.Fatalf("%v %s%s", ok, out, errText)
+	}
+
+	rules := filepath.Join(clones[0], "repos.toml")
+	if err := os.WriteFile(local, []byte(fmt.Sprintf("rules_file = %q\n", filepath.ToSlash(rules))), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	env := s.json("checkouts", "update", "--rules", "--format", "json")
+	list := env["data"].(map[string]any)["checkouts"].([]any)
+	if len(list) != 1 {
+		t.Fatalf("%v", env)
+	}
+	if c := list[0].(map[string]any); c["state"] != "current" || c["updated"] != true {
+		t.Fatalf("%v", c)
+	}
+	if got, _ := os.ReadFile(rules); string(got) != "# rules, newer\n" {
+		t.Fatalf("rules file %q", got)
+	}
+
+	// A path beside --rules is a usage mistake, said plainly.
+	if out, errText, ok := s.gitdcy("checkouts", "update", "--rules", "~/code/app0"); ok || !strings.Contains(out+errText, "--rules takes no PATH") {
+		t.Fatalf("%v %s%s", ok, out, errText)
+	}
+
+	// A rules file in no git checkout: said, and no failure.
+	loose := filepath.Join(s.home(), "loose.toml")
+	if err := os.WriteFile(loose, []byte("\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(local, []byte(fmt.Sprintf("rules_file = %q\n", filepath.ToSlash(loose))), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, errText, ok := s.gitdcy("checkouts", "update", "--rules"); !ok || !strings.Contains(out, "in no git checkout") {
+		t.Fatalf("%v %s%s", ok, out, errText)
+	}
+}
