@@ -76,6 +76,8 @@ type ScanReport struct {
 	// words are not shown).
 	PersonalWords    int `json:"personal_words"`
 	AllowedAddresses int `json:"allowed_addresses"`
+	// How many words commit messages are read for.
+	MessageWords int `json:"message_words"`
 	// Who may author and commit a push (the rules file's identities; a
 	// [[repo]] may hold its own); empty: no identity check. Read on a
 	// push only, never on what already reached a remote.
@@ -156,7 +158,7 @@ func rulesScan(rulesPath string, paths []string, since *string, gitdcy, gh strin
 	identities := []string{}
 	if file != nil {
 		rules = file.Hygiene
-		config = personalConfig{words: file.Personal, allow: file.Allow}
+		config = personalConfig{words: file.Personal, allow: file.Allow, messageWords: file.MessageWords}
 		identities = append(identities, file.Identities...)
 	}
 	reads := scanParallel(paths, func(given string) *scanRead {
@@ -300,6 +302,7 @@ func rulesScan(rulesPath string, paths []string, since *string, gitdcy, gh strin
 		PullRequestsDetail: detail,
 		PersonalWords:      len(config.words),
 		AllowedAddresses:   len(config.allow),
+		MessageWords:       len(config.messageWords),
 		AllowedIdentities:  identities,
 		Checkouts:          checkouts,
 	}, nil

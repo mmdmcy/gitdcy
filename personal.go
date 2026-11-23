@@ -8,7 +8,11 @@ package main
 //   - consumer mail addresses (gmail, hotmail, outlook, icloud, ...) that are
 //     not one of the repository's own git identities or on the owner's allow
 //     list;
-//   - the owner's own words (names, phone numbers), from the rules file;
+//   - the owner's own words (names, phone numbers), from the rules file, in
+//     the added lines, the message, the author and committer, and in the
+//     bytes of every binary file a commit adds or changes (binary.go);
+//   - the rules file's message words (an AI tool's credit line), in the
+//     message alone: a file may quote another project's commit;
 //   - tokens and private keys of the formats in secrets.go, never allowed;
 //   - an author or committer the rules file's identities do not list, when
 //     it lists any (the push check only: a scan of what already reached a
@@ -46,6 +50,8 @@ const (
 	findingConsumerAddress FindingKind = "consumer-address"
 	findingPersonalWord    FindingKind = "personal-word"
 	findingIdentity        FindingKind = "identity"
+	findingMessageWord     FindingKind = "message-word"
+	findingBinaryWord      FindingKind = "binary-personal-word"
 )
 
 func (k FindingKind) label() string {
@@ -56,6 +62,10 @@ func (k FindingKind) label() string {
 		return "an identity the rules do not allow"
 	case findingToken:
 		return "a token or private key"
+	case findingMessageWord:
+		return "a word the rules keep out of commit messages"
+	case findingBinaryWord:
+		return "a word from the personal list (in a binary file)"
 	}
 	return "a word from the personal list"
 }
@@ -76,6 +86,8 @@ type Finding struct {
 type personalConfig struct {
 	words []string
 	allow []string
+	// Words that never go in a commit message (read in the message alone).
+	messageWords []string
 	// Who may author and commit; none: no identity check.
 	identities []string
 	// The rules file in use, as a path in the repository being read
@@ -233,6 +245,21 @@ func personalIn(line string, words []string, allowed map[string]bool) []personal
 	return append(out, secretsIn(line)...)
 }
 
+// messageWordsIn is each message word the message holds, in any case, as
+// the rules file writes it: a message word is policy, not personal data,
+// so it is shown.
+func messageWordsIn(message string, words []string) []string {
+	lower := rustLower(message)
+	var out []string
+	for _, word := range words {
+		word = trim(word)
+		if word != "" && strings.Contains(lower, rustLower(word)) && !contains(out, word) {
+			out = append(out, word)
+		}
+	}
+	return out
+}
+
 // personalOwnIdentities is the allow list plus the repository's own git
 // identities (local and global).
 func personalOwnIdentities(repo string, allow []string) map[string]bool {
@@ -279,7 +306,7 @@ func personalHeader(record string) bool {
 // (commit ids, with --stdin), "" for nothing.
 func personalLog(repo string, revs []string, stdin string, config personalConfig, allowed map[string]bool) ([]personalCommit, error) {
 	args := []string{
-		"-c", "core.quotePath=false", "log", "-p", "-U0", "--no-color", "--no-renames",
+		"-c", "core.quotePath=false", "log", "-p", "-U0", "--no-color", "--no-renames", "--full-index",
 		"--no-ext-diff", "--no-textconv", "--src-prefix=a/", "--dst-prefix=b/",
 		"--format=%x1e%H%x1f%h%x1f%an <%ae>%x1f%cn <%ce>%x1f%B%x1f",
 	}
@@ -300,6 +327,9 @@ func personalLog(repo string, revs []string, stdin string, config personalConfig
 		records = append(records, record)
 	}
 	commits := make([]personalCommit, 0, len(records))
+	// Binary files whose new content is read for the personal words, once
+	// every commit is parsed.
+	var binaries []binaryBlob
 	for _, record := range records {
 		parts := strings.SplitN(record, "\x1f", 6)
 		if len(parts) < 6 {
@@ -329,6 +359,9 @@ func personalLog(repo string, revs []string, stdin string, config personalConfig
 			}
 		}
 		note("message", parts[4])
+		for _, word := range messageWordsIn(parts[4], config.messageWords) {
+			c.findings = append(c.findings, Finding{Commit: c.short, Place: "message", Kind: findingMessageWord, Shown: word})
+		}
 		// A key file's header and the line after it.
 		var pem secretPEM
 		key := func(place, line string) {
@@ -341,8 +374,22 @@ func personalLog(repo string, revs []string, stdin string, config personalConfig
 		}
 		pem = secretPEM{}
 		lineNo := uint64(0)
+		// The file the diff header names and its new blob, for a binary one.
+		header, blob := "", ""
 		for _, line := range lines(diff) {
-			if file, ok := strings.CutPrefix(line, "+++ b/"); ok {
+			if names, ok := strings.CutPrefix(line, "diff --git "); ok {
+				header, blob = binaryDiffPath(names), ""
+			} else if index, ok := strings.CutPrefix(line, "index "); ok && header != "" {
+				if fields := strings.Fields(index); len(fields) > 0 {
+					_, blob, _ = strings.Cut(fields[0], "..")
+				}
+			} else if strings.HasPrefix(line, "Binary files ") && strings.HasSuffix(line, " differ") {
+				// A deleted file's new blob is all zeros: nothing is added.
+				if blob != "" && !rulesIsZero(blob) && header != config.rulesFile && len(config.words) > 0 {
+					binaries = append(binaries, binaryBlob{commit: len(commits), path: header, id: blob})
+				}
+				header, blob = "", ""
+			} else if file, ok := strings.CutPrefix(line, "+++ b/"); ok {
 				path = file
 				pem = secretPEM{}
 			} else if hunk, ok := strings.CutPrefix(line, "@@ "); ok {
@@ -362,6 +409,19 @@ func personalLog(repo string, revs []string, stdin string, config personalConfig
 			}
 		}
 		commits = append(commits, c)
+	}
+	if len(binaries) > 0 {
+		found, err := binaryWords(repo, binaries, config.words)
+		if err != nil {
+			return nil, err
+		}
+		for i, b := range binaries {
+			c := &commits[b.commit]
+			for _, index := range found[i] {
+				shown := personalMask(findingPersonalWord, rustLower(trim(config.words[index])), index)
+				c.findings = append(c.findings, Finding{Commit: c.short, Place: b.path, Kind: findingBinaryWord, Shown: shown})
+			}
+		}
 	}
 	return commits, nil
 }
