@@ -499,10 +499,24 @@ remind of work left lying around, each reminder with what clears it:
 [hygiene]
 branch_days = 3                       # default
 skip = ["github.com/example-employer/"]   # repositories that keep their own rules
+skip_folders = ["backups"]            # default: copies kept as they were
 ```
 
 A repository whose remote starts with a `skip` prefix gets no reminders
-(`hygiene_off` says why), and without the table there are none at all. The push
+(`hygiene_off` says why), and without the table there are none at all. Nor
+does a checkout with a `skip_folders` name above it (`~/backups/2026-11-01/app`;
+a checkout itself named so is still read; `skip_folders = []` for none), or an
+empty checkout (no commit and no file). Open pull requests are asked only for
+the GitHub repositories something was pushed to from the checkout, so a clone
+of another person's project or a fork's upstream is not asked about. When
+`gitdcy checkouts` had a fetch refused for want of a login (git could not ask
+for a user name, a credential helper wanted a prompt, a 401 or 403, a refused
+SSH key), the host is kept (`fetch-failures.json` in gitdcy's cache folder)
+until a fetch from it goes through; a scan then says once per host that this
+device cannot fetch there (`data.fetch_refused`: `host`, `at`, `error`,
+`since`, the oldest last good fetch, and `checkouts`), and those checkouts'
+`stale_remote` names it and they get no `behind`, `unpushed` or `branch`
+reminders, which would be read against refs as old as that fetch. The push
 check prints its reminders on one line on standard error and never refuses a
 push for them; in JSON they are `data.reminders`, each with `kind` (`dirty`,
 `behind`, `unpushed`, `branch`, `pull-request`, `pull-requests-unknown`),

@@ -189,7 +189,7 @@ func TestRulesTOMLMistakesAreShownAsTheTomlCrateShowedThem(t *testing.T) {
 		"[[repo]]\nname = \"a\"\nremotes = [\"x/y\"]\npush = \"github\"\nfirst_commit = \"abc\"\nprotected = 5\n": "TOML parse error at line 6, column 13\n  |\n6 | protected = 5\n  |             ^\n" +
 			"invalid type: integer `5`, expected a sequence\n",
 		"hygiene.days = 3\n": "TOML parse error at line 1, column 9\n  |\n1 | hygiene.days = 3\n  |         ^^^^\n" +
-			"unknown field `days`, expected `branch_days` or `skip`\n",
+			"unknown field `days`, expected one of `branch_days`, `skip`, `skip_folders`\n",
 		"[[repo]]\nname = \"a\"\nremotes = [\"x/y\"]\n\n  [[repo]]   # indented\n  remotes = [\"x/z\"]\n": "TOML parse error at line 5, column 3\n  |\n5 |   [[repo]]   # indented\n  |   ^^^^^^^^\n" +
 			"missing field `name`\n",
 		"repo = [{remotes = [\"x/y\"]}]\n": "TOML parse error at line 1, column 9\n  |\n1 | repo = [{remotes = [\"x/y\"]}]\n  |         ^^^^^^^^^^^^^^^^^^^\n" +

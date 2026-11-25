@@ -9,6 +9,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"strings"
@@ -72,6 +73,9 @@ type ScanReport struct {
 	// (no reminders, or no checkout on GitHub).
 	PullRequests       string `json:"pull_requests"`
 	PullRequestsDetail string `json:"pull_requests_detail,omitempty"`
+	// Hosts whose fetches were refused for want of credentials (by
+	// `gitdcy checkouts`), each said once; empty when none.
+	FetchRefused []FetchRefused `json:"fetch_refused"`
 	// How many personal words and allowed addresses are read for (the
 	// words are not shown).
 	PersonalWords    int `json:"personal_words"`
@@ -134,14 +138,55 @@ type scanRead struct {
 	err    string
 }
 
+// scanURLs is the checkout's remote URLs, push and fetch, as configured
+// (as the push check reads them).
 func scanURLs(report *RulesReport) []string {
 	var urls []string
+	if report.repo != nil {
+		for _, remote := range report.repo.remotes {
+			urls = append(urls, remote.urls...)
+		}
+		return urls
+	}
 	for _, remote := range report.Remotes {
 		if remote.URL != nil {
 			urls = append(urls, *remote.URL)
 		}
 	}
 	return urls
+}
+
+// scanOwnURLs is the URLs of the remotes something was pushed to from this
+// checkout: its own repositories, the ones whose open pull requests are
+// asked for (a fork's upstream, or a clone of another person's project,
+// is not).
+func scanOwnURLs(report *RulesReport) []string {
+	if report.repo == nil || report.repo.gitDir == "" {
+		return scanURLs(report)
+	}
+	pushed := pushedRemotes(report.repo.gitDir)
+	var urls []string
+	for _, remote := range report.repo.remotes {
+		if pushed[remote.name] {
+			urls = append(urls, remote.urls...)
+		}
+	}
+	return urls
+}
+
+// FetchRefused is a host this device's fetches are refused by for want of
+// credentials: its checkouts' remote-tracking refs are as old as their last
+// good fetch.
+type FetchRefused struct {
+	Host string `json:"host"`
+	// When the last fetch was refused (Unix seconds), and what git said.
+	At    int64  `json:"at"`
+	Error string `json:"error"`
+	// The oldest last good fetch among its checkouts (Unix seconds); null
+	// when one never fetched.
+	Since *int64 `json:"since"`
+	// How many checkouts' remote state was not judged for it.
+	Checkouts int `json:"checkouts"`
 }
 
 // rulesScan reads every checkout in paths against the rules file at
@@ -181,11 +226,13 @@ func rulesScan(rulesPath string, paths []string, since *string, gitdcy, gh strin
 			if read == nil || read.report == nil {
 				continue
 			}
-			urls := scanURLs(read.report)
-			if _, skipped := rules.skippedBy(urls); skipped {
+			if _, skipped := rules.skippedBy(scanURLs(read.report)); skipped {
 				continue
 			}
-			if repo, ok := githubRepository(urls); ok {
+			if _, skipped := rules.skippedFolder(read.report.Repository); skipped {
+				continue
+			}
+			if repo, ok := githubRepository(scanOwnURLs(read.report)); ok {
 				if owner, _, ok := splitOnce(repo, "/"); ok {
 					set[owner] = true
 				}
@@ -212,6 +259,7 @@ func rulesScan(rulesPath string, paths []string, since *string, gitdcy, gh strin
 	for i := range paths {
 		jobs[i] = job{paths[i], reads[i]}
 	}
+	refusals := fetchFailLoad(fetchFailPath())
 	cachePath := pushedPath()
 	cache := pushedLoad(cachePath)
 	base := pushedBase(rulesPath)
@@ -273,8 +321,21 @@ func rulesScan(rulesPath string, paths []string, since *string, gitdcy, gh strin
 		} else if prefix, skipped := rules.skippedBy(urls); skipped {
 			off := "keeps its own rules: its remote starts with " + prefix + " ([hygiene] skip)"
 			found.HygieneOff = &off
+		} else if name, skipped := rules.skippedFolder(root); skipped {
+			off := "a copy kept as it was: it lies under a folder named " + name + " ([hygiene] skip_folders)"
+			found.HygieneOff = &off
+		} else if hygEmpty(root) {
+			off := "an empty checkout: no commit and no file"
+			found.HygieneOff = &off
 		} else {
-			h := hygRead(report.repo, *rules, urls, github, nil, false)
+			own := scanOwnURLs(report)
+			h := hygRead(report.repo, *rules, own, github, nil, false)
+			if _, onGitHub := githubRepository(urls); onGitHub && h.PullRequests.State == "not-asked" {
+				h.PullRequests.Detail = "nothing was pushed to its GitHub remote from here: someone else's repository, not asked"
+			}
+			if host, _, refused := refusals.refusing(urls); refused {
+				hygStale(&h, host)
+			}
 			found.Hygiene = &h
 		}
 		return done{found, kept}
@@ -294,6 +355,7 @@ func rulesScan(rulesPath string, paths []string, since *string, gitdcy, gh strin
 	}
 	pushedSave(cachePath, cache)
 	return &ScanReport{
+		FetchRefused:       scanFetchRefused(refusals, checkouts),
 		RulesFile:          rulesPath,
 		RulesFileFound:     file != nil,
 		Since:              sinceText,
@@ -306,4 +368,41 @@ func rulesScan(rulesPath string, paths []string, since *string, gitdcy, gh strin
 		AllowedIdentities:  identities,
 		Checkouts:          checkouts,
 	}, nil
+}
+
+// scanFetchRefused is each refusing host with the checkouts it left stale,
+// by host.
+func scanFetchRefused(refusals *fetchFailures, checkouts []CheckoutScan) []FetchRefused {
+	byHost := map[string]*FetchRefused{}
+	for _, c := range checkouts {
+		if c.Hygiene == nil || c.Hygiene.StaleRemote == nil {
+			continue
+		}
+		host := *c.Hygiene.StaleRemote
+		r, ok := byHost[host]
+		if !ok {
+			failure := refusals.Hosts[host]
+			r = &FetchRefused{Host: host, At: failure.At, Error: failure.Error}
+			byHost[host] = r
+		}
+		r.Checkouts++
+		if at := c.Hygiene.FetchedAt; at != nil && (r.Since == nil || *at < *r.Since) {
+			since := *at
+			r.Since = &since
+		}
+	}
+	list := []FetchRefused{}
+	for _, host := range sortedKeys(byHost) {
+		list = append(list, *byHost[host])
+	}
+	return list
+}
+
+// scanStaleText is what a refusing host leaves stale, in words.
+func scanStaleText(f FetchRefused) string {
+	since := "never fetched"
+	if f.Since != nil {
+		since = "as of " + time.Unix(*f.Since, 0).UTC().Format("2006-01-02")
+	}
+	return fmt.Sprintf("the remote refs of %d checkout(s) are %s, so pulls, pushes and merges against them are not judged (give this device a login for it, then gitdcy checkouts)", f.Checkouts, since)
 }

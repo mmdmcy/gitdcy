@@ -341,6 +341,9 @@ func rulesPrintScan(r *ScanReport) {
 	if r.PullRequests == "unknown" {
 		fmt.Printf("  open pull requests are unknown: %s (gh auth login, then scan again)\n", r.PullRequestsDetail)
 	}
+	for _, f := range r.FetchRefused {
+		fmt.Printf("  %s: this device cannot fetch from it (%s); %s\n", f.Host, f.Error, scanStaleText(f))
+	}
 	quiet := 0
 	for _, c := range r.Checkouts {
 		if !rulesNotable(c) {

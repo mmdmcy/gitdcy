@@ -218,7 +218,8 @@ func (f *RulesFile) equal(o *RulesFile) bool {
 		return f == o
 	}
 	sameHygiene := (f.Hygiene == nil) == (o.Hygiene == nil) &&
-		(f.Hygiene == nil || f.Hygiene.BranchDays == o.Hygiene.BranchDays && rulesSameList(f.Hygiene.Skip, o.Hygiene.Skip))
+		(f.Hygiene == nil || f.Hygiene.BranchDays == o.Hygiene.BranchDays && rulesSameList(f.Hygiene.Skip, o.Hygiene.Skip) &&
+			rulesSameList(f.Hygiene.SkipFolders, o.Hygiene.SkipFolders))
 	if !sameHygiene || len(f.Repos) != len(o.Repos) || !rulesSameList(f.Selfhosted, o.Selfhosted) ||
 		!rulesSameList(f.Personal, o.Personal) || !rulesSameList(f.Allow, o.Allow) || !rulesSameList(f.MessageWords, o.MessageWords) ||
 		!rulesSameList(f.Identities, o.Identities) {
@@ -247,7 +248,8 @@ func rulesSameList(a, b []string) bool {
 }
 
 // rulesParse reads a rules file's text. A [hygiene] table without
-// branch_days gets its default, 3 (serde's `default = fn` for the field).
+// branch_days gets its default, 3 (serde's `default = fn` for the field),
+// and one without skip_folders gets ["backups"].
 func rulesParse(text string) (RulesFile, error) {
 	var file RulesFile
 	if err := tomlUnmarshal(text, &file); err != nil {
@@ -256,11 +258,17 @@ func rulesParse(text string) (RulesFile, error) {
 	if file.Hygiene != nil {
 		var given struct {
 			Hygiene *struct {
-				BranchDays *uint64 `json:"branch_days"`
+				BranchDays  *uint64   `json:"branch_days"`
+				SkipFolders *[]string `json:"skip_folders"`
 			} `json:"hygiene"`
 		}
-		if tomlUnmarshal(text, &given) == nil && given.Hygiene != nil && given.Hygiene.BranchDays == nil {
-			file.Hygiene.BranchDays = hygDefaultBranchDays
+		if tomlUnmarshal(text, &given) == nil && given.Hygiene != nil {
+			if given.Hygiene.BranchDays == nil {
+				file.Hygiene.BranchDays = hygDefaultBranchDays
+			}
+			if given.Hygiene.SkipFolders == nil {
+				file.Hygiene.SkipFolders = append([]string{}, hygDefaultSkipFolders...)
+			}
 		}
 	}
 	return file, nil
@@ -1218,6 +1226,9 @@ func rulesPushReminders(found *rulesFound, pushing []string) []Reminder {
 		urls = append(urls, remote.urls...)
 	}
 	if _, skipped := rules.skippedBy(urls); skipped {
+		return nil
+	}
+	if _, skipped := rules.skippedFolder(found.repo.root); skipped {
 		return nil
 	}
 	github := hygUnknown("not on GitHub")

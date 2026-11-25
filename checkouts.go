@@ -82,6 +82,8 @@ type checkoutsCheckout struct {
 	// fetch.
 	FetchError string `json:"fetch_error"`
 	Detail     string `json:"detail"`
+	// A fetch was tried; it was refused for want of a login (fetchfail.go).
+	fetchTried, fetchForCredentials bool
 	// Facts, with --facts, for every checkout that is not missing.
 	Facts *factsReport `json:"facts,omitempty"`
 }
@@ -106,6 +108,12 @@ func checkoutsRead(paths []string, options checkoutsOptions) []checkoutsCheckout
 		}(start, end)
 	}
 	wg.Wait()
+	if options.fetch {
+		path := fetchFailPath()
+		if failures := fetchFailLoad(path); failures.note(report, time.Now().Unix()) {
+			fetchFailSave(path, failures)
+		}
+	}
 	return report
 }
 
@@ -177,8 +185,10 @@ func checkoutsReadInto(dir string, found *checkoutsCheckout, fetch bool) error {
 		found.TrackingBranch = trim(tracking)
 	}
 	if fetch && found.TrackingBranch != "" {
+		found.fetchTried = true
 		if err := checkoutsFetchUpstream(dir); err != nil {
 			found.FetchError = checkoutsFirstLine(chainText(err))
+			found.fetchForCredentials = fetchForWantOfCredentials(chainText(err))
 		}
 	}
 	found.Remote = checkoutsRemoteOf(dir, found.Branch)

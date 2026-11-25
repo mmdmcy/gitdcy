@@ -734,6 +734,18 @@ func rulesFakeGh(s *rulesSandbox, answer string) {
 	s.path = bin + ":" + s.path
 }
 
+// rulesPushedToGitHub adds the remote github (github.com/example-org/app)
+// and pushes main to it; the push lands in the checkout's own forge
+// (pushInsteadOf), so nothing leaves the sandbox, and git logs it as a push
+// to github: the repository is the owner's own, its pull requests asked.
+func rulesPushedToGitHub(s *rulesSandbox, work, name string) {
+	s.t.Helper()
+	url := "https://github.com/example-org/app.git"
+	s.ok(work, "remote", "add", "github", url)
+	s.ok(work, "config", "url."+filepath.Join(s.root, name+"-forge.git")+".pushInsteadOf", url)
+	s.ok(work, "push", "-q", "github", "main")
+}
+
 // rulesOldCommit makes a commit dated days ago, on the branch checked out.
 func rulesOldCommit(s *rulesSandbox, work, file string, days int64) {
 	when := fmt.Sprintf("@%d +0000", time.Now().Unix()-days*86400)
@@ -795,7 +807,7 @@ func TestRulesCmdRemindersNameTheDirtyDishesAndNeverRefuseAPush(t *testing.T) {
 	work, first := s.repo("app")
 	s.ok(work, "push", "-q", "origin", "main")
 	s.ok(work, "branch", "-q", "--set-upstream-to=origin/main")
-	s.ok(work, "remote", "add", "github", "https://github.com/example-org/app.git")
+	rulesPushedToGitHub(s, work, "app")
 	s.rules(rulesRule(first, `"anywhere"`, "") + "\n[hygiene]\nbranch_days = 3\n")
 	rulesFakeGh(s, rulesOnePR)
 	s.ok(work, "checkout", "-qb", "old-idea")
@@ -838,7 +850,7 @@ func TestRulesCmdRemindersNameTheDirtyDishesAndNeverRefuseAPush(t *testing.T) {
 func TestRulesCmdWithoutGhPullRequestsAreUnknownAndASkippedRepositoryGetsNoReminders(t *testing.T) {
 	s := newRulesSandbox(t)
 	work, first := s.repo("app")
-	s.ok(work, "remote", "add", "github", "https://github.com/example-org/app.git")
+	rulesPushedToGitHub(s, work, "app")
 	rulesFakeGh(s, "echo 'To get started with GitHub CLI, please run:  gh auth login' >&2; exit 4")
 	s.rules(rulesRule(first, `"anywhere"`, "") + "\n[hygiene]\n")
 	out := s.gitdcy(work, "rules", "scan", "--format", "json", ".")

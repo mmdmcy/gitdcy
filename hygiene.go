@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -46,7 +47,14 @@ type HygieneRules struct {
 	// Remote URL prefixes (`github.com/example-org/`) of repositories that
 	// keep their own rules, such as an employer's: no reminders for them.
 	Skip []string `json:"skip,omitempty"`
+	// Folder names whose checkouts get no reminders: a checkout with one
+	// of them above it (~/backups/2026-11-01/app) is a copy kept as it
+	// was, old branches on purpose. Default ["backups"]; [] for none.
+	SkipFolders []string `json:"skip_folders"`
 }
+
+// hygDefaultSkipFolders is skip_folders when the table does not say.
+var hygDefaultSkipFolders = []string{"backups"}
 
 func (*HygieneRules) denyUnknownTOML() {}
 
@@ -59,7 +67,60 @@ func (h *HygieneRules) validate() error {
 			return errf("[hygiene] an empty prefix in skip")
 		}
 	}
+	for _, name := range h.SkipFolders {
+		if trim(name) == "" || strings.ContainsAny(name, `/\`) {
+			return errf("[hygiene] skip_folders takes folder names, not paths: %q", name)
+		}
+	}
 	return nil
+}
+
+// skippedFolder is the skip_folders name found above the checkout whose
+// top folder is root, if any (the checkout's own name is not looked at).
+func (h *HygieneRules) skippedFolder(root string) (string, bool) {
+	parent := filepath.Dir(filepath.Clean(root))
+	for _, part := range strings.FieldsFunc(filepath.ToSlash(parent), func(r rune) bool { return r == '/' }) {
+		for _, name := range h.SkipFolders {
+			if strings.EqualFold(part, name) {
+				return name, true
+			}
+		}
+	}
+	return "", false
+}
+
+// hygEmpty reports whether the checkout at dir holds nothing: no commit
+// and no file besides its git folder (a clone of an empty repository).
+func hygEmpty(dir string) bool {
+	if _, ok := hygGit(dir, "rev-parse", "--verify", "-q", "HEAD^{commit}"); ok {
+		return false
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false
+	}
+	for _, e := range entries {
+		if e.Name() != ".git" {
+			return false
+		}
+	}
+	return true
+}
+
+// hygStale is the reminders without the ones read against remote-tracking
+// refs (behind, unpushed, branch), for a checkout whose remote refused its
+// fetch: those refs are as of its last good fetch.
+func hygStale(h *Hygiene, host string) {
+	h.StaleRemote = &host
+	kept := h.Reminders[:0]
+	for _, r := range h.Reminders {
+		switch r.Kind {
+		case "behind", "unpushed", "branch":
+		default:
+			kept = append(kept, r)
+		}
+	}
+	h.Reminders = kept
 }
 
 // skippedBy is the skip prefix one of these remote URLs starts with, if any.
@@ -145,7 +206,11 @@ type Hygiene struct {
 	// Branches not merged into Base for branch_days or more.
 	Branches     []Branch     `json:"branches"`
 	PullRequests PullRequests `json:"pull_requests"`
-	Reminders    []Reminder   `json:"reminders"`
+	// The host that refused this device's last fetch for want of
+	// credentials (the scan's fetch_refused says when): behind, unpushed
+	// and branch are then not reminded of; null when none did.
+	StaleRemote *string    `json:"stale_remote"`
+	Reminders   []Reminder `json:"reminders"`
 }
 
 func hygNow() int64 {
